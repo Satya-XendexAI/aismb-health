@@ -381,3 +381,59 @@ Doctor closes day:
 | Pessimistic Lock | `SELECT FOR UPDATE` on Slot prevents race condition in slot booking |
 | Atomic Transaction | Modify flow wraps cancel + rebook in a single DB transaction |
 | Audit Log | Every state transition recorded in `AuditLog` with actor and timestamp |
+
+---
+
+## 9. Open Questions / Review Notes
+
+### 9.1 Token Skip and Late Re-admission (Token System)
+
+**Scenario:** A patient receives a token and is placed in the BUFFER (pre-called to the waiting area), but is not physically present when the attender checks. The attender needs to skip that patient and move to the next token. Later, if the patient arrives, the attender should be able to re-insert them directly into the buffer — but only if their original token number is less than the currently serving token number (i.e., they were genuinely called earlier and missed their turn).
+
+**Proposed behaviour:**
+
+#### Skip Flow
+```
+skip_token(token_id, attender_id)
+
+1. Fetch Token → validate status = BUFFER (only buffered tokens can be skipped)
+2. Get attender confirmation (UI concern — flagged here as a required UX gate)
+3. Mark Token.status = SKIPPED
+4. Remove token_id from TokenQueue.buffer_token_ids
+5. Resolve next buffer slot: peek queue using ratio rule, add replacement to buffer
+6. BufferNotifier → notify replacement token
+7. Update TokenQueue (buffer_token_ids, version++)
+8. AuditLogger → log SKIPPED, actor = attender_id
+```
+
+New token status required: `SKIPPED` — add to `TokenStatus` enum between `BUFFER` and `CANCELLED`.
+
+#### Late Re-admission Flow
+```
+reinstate_to_buffer(token_id, attender_id)
+
+1. Fetch Token → validate status = SKIPPED
+2. Fetch TokenQueue → validate token.token_number < serving_token.token_number
+   (patient was called before the current patient — genuinely missed their turn)
+3. If TokenQueue.buffer_token_ids has < 3 entries:
+     Mark Token.status = BUFFER
+     Append token_id to TokenQueue.buffer_token_ids
+     BufferNotifier → notify patient
+     Update TokenQueue (version++)
+     AuditLogger → log REINSTATED, actor = attender_id
+4. If buffer already full (3 tokens):
+     Reject with BUFFER_FULL error — attender must wait for a slot to open
+```
+
+**Constraints:**
+- Only attender role can call `skip_token` and `reinstate_to_buffer` (not patient-initiated)
+- Re-admission is only valid when `token.token_number < current_serving_token_number` — prevents abuse (patient cannot be re-admitted if their token hasn't been reached yet)
+- A SKIPPED token cannot be re-skipped or cancelled — it can only be reinstated or left as SKIPPED (expires at session close)
+
+**Impact on session close:**
+- SKIPPED tokens at session close → mark as CANCELLED with reason `SESSION_CLOSED` (same as WAITING/BUFFER)
+
+**Open items — confirmation needed:**
+- [ ] Should the attender confirmation (step 2 of skip flow) be enforced at the API level (e.g., a required `confirmed: true` flag in the request) or is it purely a UI concern?
+- [ ] If the buffer is full when a skipped patient returns, should the system allow the attender to manually bump one buffer token back to WAITING to make room?
+- [ ] Maximum number of times a token can be skipped and reinstated (should there be a limit, e.g., max 2 reinstatements per token)?
