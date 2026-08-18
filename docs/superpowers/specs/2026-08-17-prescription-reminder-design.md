@@ -8,7 +8,7 @@
 
 ## 1. Overview
 
-The Prescription Medication Reminder Service fires dose reminders for active medications. Medication data is managed directly in the DB from the backend — no EMR adapter or registration flow. The service exposes a single `evaluate(now)` method that fires a WhatsApp reminder for each medication dose due at or before `now`, skipping doses already sent.
+The Prescription Medication Reminder Service fires dose reminders for active medications. Medication data is managed directly in the DB from the backend — no EMR adapter or registration flow. The service exposes a single `evaluate(now)` method that groups all due doses by patient and sends one WhatsApp reminder per patient per dose time, listing all their due medications together.
 
 Sent reminders are recorded in a SQL DB table for idempotency.
 
@@ -55,16 +55,15 @@ medications                              -- populated and managed by backend
   start_date        date
   end_date          date
 
-reminder_records                         -- written by the service
+reminder_records                         -- written by the service; one per patient per dose slot
   reminder_id       UUID        PK
-  medication_id     UUID        FK → medications
   patient_id        UUID
-  due_at            datetime    the exact dose slot (date + dose_time)
+  due_at            datetime    the dose slot (date + dose_time) this reminder covers
   status            Enum        SENT | FAILED
   fired_at          datetime
 ```
 
-**Idempotency key:** `(medication_id, due_at)` — one row per dose slot per medication. `evaluate()` skips a slot if a row already exists.
+**Idempotency key:** `(patient_id, due_at)` — one reminder per patient per dose slot. `evaluate()` skips a slot if a row already exists for that patient.
 
 ---
 
@@ -73,32 +72,33 @@ reminder_records                         -- written by the service
 ### 4.1 evaluate(now: datetime)
 
 ```
-SELECT * FROM medications
-WHERE start_date <= now.date() AND end_date >= now.date()
+1. Fetch active medications:
+   SELECT * FROM medications
+   WHERE start_date <= now.date() AND end_date >= now.date()
 
-For each medication:
+2. Collect due dose slots:
+   For each medication, for each dose_time:
+     due_at = datetime.combine(now.date(), dose_time)
+     if due_at <= now: include (patient_id, due_at, medication)
 
-  For each dose_time in medication.dose_times:
-    due_at = datetime.combine(now.date(), dose_time)
+3. Group by (patient_id, due_at)
 
-    if due_at > now: skip   ← not yet due
+4. For each (patient_id, due_at) group:
 
-    if SELECT EXISTS FROM reminder_records
-       WHERE medication_id = ? AND due_at = ?: skip   ← already fired
+     a. Check no existing reminder_records row for (patient_id, due_at)
+        → skip if already sent (idempotency)
 
-    status = 'SENT'
-    try:
-      ReminderNotifier.send_reminder(
-        patient_id       = medication.patient_id,
-        drug_name        = medication.drug_name,
-        dose_description = medication.dose_description,
-        due_at           = due_at
-      )
-    except Exception:
-      status = 'FAILED'
+     b. status = 'SENT'
+        try:
+          ReminderNotifier.send_reminder(
+            patient_id  = patient_id,
+            due_at      = due_at,
+            medications = [{ drug_name, dose_description } for each med in group]
+          )
+        except Exception:
+          status = 'FAILED'
 
-    INSERT INTO reminder_records(medication_id, patient_id,
-                                 due_at, status, fired_at = now)
+     c. INSERT INTO reminder_records(patient_id, due_at, status, fired_at = now)
 ```
 
 ---
@@ -117,5 +117,5 @@ For each medication:
 |---|---|
 | DB-managed data | Medications created and managed by backend; service reads them directly — no adapter or registration flow |
 | Evaluate-on-tick | `evaluate(now)` called externally; time injected for deterministic tests |
-| Idempotency | `(medication_id, due_at)` existence check prevents double-send on repeated ticks |
+| Idempotency | `(patient_id, due_at)` existence check prevents double-send on repeated ticks |
 | Fire-and-forget | Reminders best-effort; FAILED rows logged but not retried |

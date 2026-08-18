@@ -8,7 +8,7 @@
 
 ## 1. Overview
 
-The Lab Test & Scan Reminder Service sends a single reminder to a patient a configurable number of hours before a lab test or scan is due. Test order data is managed directly in the DB from the backend — no external order system or registration flow. The service exposes a single `evaluate(now)` method that fires reminders for all due orders not yet sent.
+The Lab Test & Scan Reminder Service sends a single reminder per patient grouping all their due lab tests and scans into one WhatsApp message. Test order data is managed directly in the DB from the backend — no external order system or registration flow. The service exposes a single `evaluate(now)` method that groups due orders by patient and sends one reminder per patient per day.
 
 State is persisted in a SQL database via a `Repository` layer.
 
@@ -58,15 +58,15 @@ test_orders                              -- populated and managed by backend
   preparation_notes  str               e.g. "Fast for 8 hours before the test"
   remind_hours_before int              hours before due_date to fire; default 24
 
-reminder_records                         -- written by the service
+reminder_records                         -- written by the service; one per patient per day
   reminder_id        UUID        PK
-  order_id           UUID        FK → test_orders
   patient_id         UUID
+  reminder_date      date              the calendar day this reminder covers
   status             Enum        SENT | FAILED
   fired_at           datetime
 ```
 
-**Idempotency key:** `order_id` — one `reminder_records` row per order. `evaluate()` skips an order if a row already exists.
+**Idempotency key:** `(patient_id, reminder_date)` — one reminder per patient per day. `evaluate()` skips a patient if a row already exists for today.
 
 ---
 
@@ -75,26 +75,28 @@ reminder_records                         -- written by the service
 ### 4.1 evaluate(now: datetime)
 
 ```
-SELECT * FROM test_orders
-WHERE (due_date - remind_hours_before * interval '1 hour') <= now
+1. Fetch due orders:
+   SELECT * FROM test_orders
+   WHERE (due_date - remind_hours_before * interval '1 hour') <= now
 
-For each test_order:
+2. Group by patient_id
 
-  1. Check no existing reminder_records row for order_id
-     → skip if already fired (idempotency)
+3. For each patient_id group:
 
-  2. status = 'SENT'
-     try:
-       ReminderNotifier.send_reminder(
-         patient_id    = order.patient_id,
-         test_name     = order.test_name,
-         due_date      = order.due_date,
-         prep_notes    = order.preparation_notes
-       )
-     except Exception:
-       status = 'FAILED'
+     a. Check no existing reminder_records row for (patient_id, now.date())
+        → skip if already sent today (idempotency)
 
-  3. INSERT INTO reminder_records(order_id, patient_id, status, fired_at = now)
+     b. status = 'SENT'
+        try:
+          ReminderNotifier.send_reminder(
+            patient_id = patient_id,
+            orders     = [{ test_name, due_date, prep_notes } for each order in group]
+          )
+        except Exception:
+          status = 'FAILED'
+
+     c. INSERT INTO reminder_records(patient_id, reminder_date = now.date(),
+                                     status, fired_at = now)
 ```
 
 ---
@@ -113,5 +115,5 @@ For each test_order:
 |---|---|
 | DB-managed data | Test orders created and managed by backend; service reads them directly — no adapter or registration flow |
 | Evaluate-on-tick | `evaluate(now)` called externally; time injected for deterministic tests |
-| Idempotency | `order_id` existence check in `reminder_records` prevents double-send on repeated ticks |
+| Idempotency | `(patient_id, reminder_date)` existence check prevents double-send on repeated ticks |
 | Fire-and-forget | Reminders best-effort; FAILED rows logged but not retried |
