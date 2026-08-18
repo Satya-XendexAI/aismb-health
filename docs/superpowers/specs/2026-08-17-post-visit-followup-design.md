@@ -8,7 +8,7 @@
 
 ## 1. Overview
 
-The Post-Visit Follow-up Service is triggered manually (e.g., by a staff member or admin action). When triggered, it finds all patients with completed encounters who have not yet received a follow-up reminder, and sends each one a WhatsApp message.
+The Post-Visit Follow-up Service is triggered manually (e.g., by a staff member or admin action). When triggered, it finds all patients with completed encounters whose visit ended at least 7 days ago (configurable) and who have not yet received a follow-up reminder, and sends each one a WhatsApp message.
 
 Encounter data is managed directly in the DB from the backend. State is persisted in SQL via a `Repository` layer.
 
@@ -22,7 +22,8 @@ Encounter data is managed directly in the DB from the backend. State is persiste
 │                                                         │
 │  + send_reminders() → ReminderSummary   ← manual call   │
 │                                                         │
-│  [ notifier injected at construction ]                  │
+│  [ notifier + reminder_delay_days injected at           │
+│    construction; default 7 days ]                       │
 └──────────────┬──────────────────────────────────────────┘
                │ uses
          ┌─────┴──────────────┐
@@ -73,9 +74,10 @@ reminder_records                         -- written by the service; one per enco
 ### 4.1 send_reminders() → ReminderSummary
 
 ```
-1. Find encounters with no reminder sent:
+1. Find eligible encounters:
    SELECT DISTINCT encounter_id, patient_id FROM encounters
    WHERE status = 'COMPLETED'
+     AND visit_ended_at <= now - INTERVAL '{reminder_delay_days} days'   ← default 7 days
      AND encounter_id NOT IN (
        SELECT encounter_id FROM reminder_records WHERE status = 'SENT'
      )
