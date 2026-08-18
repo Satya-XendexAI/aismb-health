@@ -8,7 +8,7 @@
 
 ## 1. Overview
 
-The Prescription Medication Reminder Service fires dose reminders for active medications. Prescription data is mocked — no EMR registration flow. The service exposes a single `evaluate(now)` method that fires a WhatsApp reminder for each medication dose due at or before `now`, skipping doses already sent.
+The Prescription Medication Reminder Service fires dose reminders for active medications. Medication data is managed directly in the DB from the backend — no EMR adapter or registration flow. The service exposes a single `evaluate(now)` method that fires a WhatsApp reminder for each medication dose due at or before `now`, skipping doses already sent.
 
 Sent reminders are recorded in a SQL DB table for idempotency.
 
@@ -22,21 +22,20 @@ Sent reminders are recorded in a SQL DB table for idempotency.
 │                                                         │
 │  + evaluate(now: datetime) → None          ← tick       │
 │                                                         │
-│  [ mock data + notifier injected at construction ]      │
+│  [ notifier injected at construction ]                  │
 └──────────────┬──────────────────────────────────────────┘
                │ uses
-    ┌──────────┼──────────────┐
-    ▼          ▼              ▼
-MockMedications  ReminderNotifier   Repository
-(hardcoded list) (external —        (SQL DB)
-                  WhatsApp)
+         ┌─────┴──────────────┐
+         ▼                    ▼
+  ReminderNotifier        Repository
+  (external — WhatsApp)   (SQL DB — medications
+                            + reminder_records)
 ```
 
 **Components:**
 
-- `MockMedications` — a hardcoded `List[MockMedication]` injected at construction. Stands in for the EMR. No adapter ABC needed.
 - `ReminderNotifier` — sends reminder messages to patients via WhatsApp. `InMemoryReminderNotifier` with `should_fail` flag for tests.
-- `Repository` — persists `reminder_records` rows to SQL DB; used for idempotency.
+- `Repository` — reads `medications` and writes `reminder_records` to SQL DB.
 
 `MedicationReminderService` holds no mutable state itself.
 
@@ -44,25 +43,21 @@ MockMedications  ReminderNotifier   Repository
 
 ## 3. Data Models
 
-### 3.1 Mock Data (injected at construction)
+### 3.1 DB Tables
 
 ```
-MockMedication
-  medication_id     UUID
+medications                              -- populated and managed by backend
+  medication_id     UUID        PK
   patient_id        UUID
   drug_name         str               e.g. "Metformin 500mg"
   dose_description  str               e.g. "1 tablet"
   dose_times        List[time]        e.g. [08:00, 21:00]
   start_date        date
   end_date          date
-```
 
-### 3.2 DB Table
-
-```
-reminder_records
+reminder_records                         -- written by the service
   reminder_id       UUID        PK
-  medication_id     UUID
+  medication_id     UUID        FK → medications
   patient_id        UUID
   due_at            datetime    the exact dose slot (date + dose_time)
   status            Enum        SENT | FAILED
@@ -78,7 +73,10 @@ reminder_records
 ### 4.1 evaluate(now: datetime)
 
 ```
-For each MockMedication where start_date <= now.date() <= end_date:
+SELECT * FROM medications
+WHERE start_date <= now.date() AND end_date >= now.date()
+
+For each medication:
 
   For each dose_time in medication.dose_times:
     due_at = datetime.combine(now.date(), dose_time)
@@ -117,7 +115,7 @@ For each MockMedication where start_date <= now.date() <= end_date:
 
 | Pattern | Application |
 |---|---|
-| Construction-time mock | Medication list injected at construction; no EMR adapter or registration flow |
+| DB-managed data | Medications created and managed by backend; service reads them directly — no adapter or registration flow |
 | Evaluate-on-tick | `evaluate(now)` called externally; time injected for deterministic tests |
 | Idempotency | `(medication_id, due_at)` existence check prevents double-send on repeated ticks |
 | Fire-and-forget | Reminders best-effort; FAILED rows logged but not retried |
