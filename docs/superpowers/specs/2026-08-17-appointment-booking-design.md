@@ -1,6 +1,6 @@
 # Appointment Booking System — Design Spec
 
-**Date:** 2026-08-17
+**Date:** 2026-08-17 (revised 2026-08-18)
 **Scope:** Backend LLD only — no UI/channel integration
 **Status:** Approved
 
@@ -12,8 +12,10 @@ The appointment booking system supports two operating modes, configured per hosp
 
 | Mode | Description |
 |---|---|
-| `TOKEN` | Walk-in queue. Patients receive a token and are called in order based on a configurable normal:tatkal ratio. |
-| `SLOT` | Pre-configured fixed slots per doctor per day. Patients select and book an available slot. |
+| `TOKEN` | Walk-in queue. Patients receive a sequential token and wait in FIFO order. |
+| `SLOT` | Pre-configured fixed time slots per doctor per day. Patients select and book an available slot. |
+
+All state is held in-memory. No database or external persistence.
 
 ---
 
@@ -23,12 +25,12 @@ The appointment booking system supports two operating modes, configured per hosp
 ┌──────────────────────────────────────────────────────────┐
 │                    AppointmentEngine                      │
 │                                                          │
-│  + book(request)                                         │
-│  + cancel(appointment_id)                                │
-│  + modify(appointment_id, new_target)                    │
-│  + advance_buffer(doctor_id)   ← doctor calls next       │
+│  + book(request) → Token | Appointment                   │
+│  + cancel(booking_id, patient_id) → confirmation         │
+│  + view_slots(hospital_id, doctor_id, date) → List[Slot] │
+│  + get_queue_position(token_id) → int                    │
 │                                                          │
-│  [ loads BookingStrategy from HospitalConfig at startup ]│
+│  [ selects strategy from HospitalConfig at construction ]│
 └────────────────────┬─────────────────────────────────────┘
                      │ uses
           ┌──────────┴──────────┐
@@ -38,402 +40,276 @@ The appointment booking system supports two operating modes, configured per hosp
    │             │      │               │
    │ + book()    │      │ + book()      │
    │ + cancel()  │      │ + cancel()    │
-   │ + next_3()  │      │ + free_slot() │
-   └─────────────┘      └───────────────┘
-
-Shared (owned by AppointmentEngine):
-  - PatientValidator     — confirm patient exists in hospital
-  - DoctorValidator      — confirm doctor is active / has open session
-  - AuditLogger          — every state change logged
-  - BufferNotifier       — signals next 3 tokens to move to waiting area (TOKEN mode only; no-op in SLOT mode)
+   │ + position()│      │ + view()      │
+   └──────┬──────┘      └───────┬───────┘
+          └──────────┬──────────┘
+                     ▼
+               InternalStore
+               (in-memory; owned by engine)
 ```
 
-**HospitalConfig** — one row per hospital with `booking_mode` and `tatkal_ratio`. Engine reads this once at startup and injects the correct strategy. `tatkal_ratio` is ignored when `booking_mode = SLOT`.
-
-**Modify behaviour by mode:**
-- `TOKEN` mode: `modify()` is **not supported** — returns `OPERATION_NOT_SUPPORTED`. Patients must cancel and walk in for a new token.
-- `SLOT` mode: `modify()` is an atomic cancel + rebook (Section 4.7).
+**HospitalConfig** — holds `hospital_id`, `name`, and `booking_mode`. Engine reads this at construction and injects the correct strategy. No DB row — passed in directly.
 
 ---
 
 ## 3. Data Models
 
-### 3.1 Shared Entities
+### 3.1 Config (passed at construction)
 
 ```
-Hospital
-  hospital_id       UUID        PK
+HospitalConfig
+  hospital_id       UUID
   name              str
   booking_mode      Enum        TOKEN | SLOT
-  tatkal_ratio      int         default 2 (serve N normal → 1 tatkal)
+```
 
+### 3.2 Shared Entities (in InternalStore)
+
+```
 Patient
   patient_id        UUID        PK
-  hospital_id       UUID        FK → Hospital
+  hospital_id       UUID
   name              str
   phone             str
-  dob               Date
 
 Doctor
   doctor_id         UUID        PK
-  hospital_id       UUID        FK → Hospital
+  hospital_id       UUID
   name              str
   specialization    str
   is_active         bool
 
 DoctorSession                        -- tracks a doctor's active consultation day
   session_id        UUID        PK
-  doctor_id         UUID        FK → Doctor
-  hospital_id       UUID        FK → Hospital
+  doctor_id         UUID
+  hospital_id       UUID
   date              Date
+  status            Enum        OPEN | CLOSED
   started_at        datetime
   ended_at          datetime?
-  status            Enum        OPEN | CLOSED
-
-AuditLog
-  log_id            UUID        PK
-  entity_type       str         "TOKEN" | "APPOINTMENT"
-  entity_id         UUID
-  action            str         BOOKED | CANCELLED | MODIFIED | CALLED | SESSION_CLOSED
-  actor_id          UUID        patient_id for patient actions; doctor_id for session/advance actions; system UUID for automated cancellations (SESSION_CLOSED)
-  timestamp         datetime
-  metadata          JSON
 ```
 
-### 3.2 Token-Based Entities
+### 3.3 Token-Mode Entities
 
 ```
 Token
   token_id          UUID        PK
-  hospital_id       UUID        FK → Hospital
-  doctor_id         UUID        FK → Doctor
-  patient_id        UUID        FK → Patient
   session_id        UUID        FK → DoctorSession
-  token_number      int         sequential per session (DB sequence)
-  token_type        Enum        NORMAL | TATKAL
-  status            Enum        WAITING | BUFFER | SERVING | COMPLETED | CANCELLED
+  patient_id        UUID
+  doctor_id         UUID
+  hospital_id       UUID
+  token_number      int         sequential; assigned by in-memory counter per session
+  status            Enum        WAITING | SERVING | COMPLETED | CANCELLED
   issued_at         datetime
   called_at         datetime?
   served_at         datetime?
-
-TokenQueue                           -- queue state per session
-  queue_id          UUID        PK
-  session_id        UUID        FK → DoctorSession (unique)
-  serving_token_id  UUID?       FK → Token (currently inside)
-  buffer_token_ids  UUID[]      next 3 pre-notified tokens
-  tatkal_count      int         pending TATKAL tokens
-  normal_count      int         pending NORMAL tokens
-  consecutive_normal_served int tracks position in current ratio cycle
-  version           int         optimistic lock counter
-  last_updated      datetime
 ```
 
-**Token number:** Both NORMAL and TATKAL share one sequential counter per session (T-001, T-002...). Token type is stored separately. Serving order is determined by type + ratio rule, not by token number.
+**Token counter:** An in-memory integer counter, one per session, starting at 1 and incrementing on each `book()` call. Counter is reset when the session closes.
 
-### 3.3 Slot-Based Entities
+**Queue position:** Count of WAITING tokens with `token_number < this token's token_number` in the same session.
+
+### 3.4 Slot-Mode Entities
 
 ```
 Slot
   slot_id           UUID        PK
-  hospital_id       UUID        FK → Hospital
-  doctor_id         UUID        FK → Doctor
+  hospital_id       UUID
+  doctor_id         UUID
   date              Date
   start_time        Time        e.g. 09:00
   end_time          Time        e.g. 09:20
   status            Enum        AVAILABLE | BOOKED | BLOCKED
-  created_by        UUID        admin who configured it
 
 Appointment
   appointment_id    UUID        PK
-  hospital_id       UUID        FK → Hospital
-  patient_id        UUID        FK → Patient
-  doctor_id         UUID        FK → Doctor
+  hospital_id       UUID
+  patient_id        UUID
+  doctor_id         UUID
   slot_id           UUID        FK → Slot
-  status            Enum        SCHEDULED | COMPLETED | CANCELLED
+  status            Enum        SCHEDULED | CANCELLED
   booked_at         datetime
   cancelled_at      datetime?
-  cancellation_reason str?
-
-Unique constraint: (patient_id, doctor_id, date) WHERE status = SCHEDULED
-  -- prevents a patient booking the same doctor twice on the same day
 ```
+
+**Uniqueness rule:** One `SCHEDULED` appointment per `(patient_id, doctor_id, date)` — enforced in-memory before booking.
 
 ---
 
 ## 4. Core Flows
 
-### 4.1 Token System — Book Token
+### 4.1 TOKEN — Book
 
 ```
-Input:  hospital_id, doctor_id, patient_id, token_type
+Input:  hospital_id, doctor_id, patient_id
 
-1. PatientValidator  → confirm patient exists in hospital
-2. DoctorValidator   → confirm DoctorSession is OPEN today
-3. TokenStrategy
-     a. Fetch active TokenQueue for session
-     b. Assign token_number via nextval('token_seq_{session_id}')
-     c. Insert Token (status = WAITING)
-     d. Increment tatkal_count or normal_count on TokenQueue
-4. AuditLogger       → log BOOKED
-5. Return token_number, estimated_wait_position
+1. Validate patient exists in InternalStore
+   → raise PatientNotFound if missing
 
-estimated_wait_position:
-  TATKAL: tatkal_count (number of tatkal patients already waiting ahead)
-  NORMAL: normal_count + ceil(tatkal_count / tatkal_ratio)
-          -- accounts for tatkal insertions that will interrupt the normal flow
+2. Validate DoctorSession is OPEN today for this doctor + hospital
+   → raise NoActiveSession if not found
+
+3. Assign token_number = session_counter[session_id]++
+
+4. Create Token(status = WAITING, issued_at = now)
+   InternalStore.save_token(token)
+
+5. Return token_number,
+          queue_position = count of WAITING tokens with token_number < this token's
 ```
 
-### 4.2 Token System — Cancel Token
+### 4.2 TOKEN — Cancel
 
 ```
 Input:  token_id, patient_id
 
-1. Fetch Token → validate patient_id matches
-2. Validate status = WAITING (BUFFER/SERVING/COMPLETED cannot be cancelled)
-3. Mark Token.status = CANCELLED
-4. Decrement tatkal_count or normal_count on TokenQueue
-5. AuditLogger → log CANCELLED
-6. Return confirmation
+1. InternalStore.get_token(token_id)
+   → raise TokenNotFound if missing
 
-Note: No queue renumbering. The gap is absorbed at the next advance_buffer call.
-      Patient must walk in for a new token.
+2. Validate token.patient_id == patient_id
+   → raise Unauthorised if mismatch
+
+3. Validate token.status == WAITING
+   → raise TokenNotCancellable if SERVING | COMPLETED | CANCELLED
+
+4. token.status = CANCELLED
+   InternalStore.save_token(token)
+
+5. Return confirmation
 ```
 
-### 4.3 Token System — Advance Buffer (Doctor calls next)
+### 4.3 TOKEN — Get Queue Position
 
 ```
-Input:  session_id, doctor_id
+Input:  token_id
 
-1. Mark current serving_token → COMPLETED, set served_at = now
-2. Apply serving order rule:
-     next_token = pick_next(TokenQueue, tatkal_ratio)
-3. Mark next_token → SERVING, set called_at = now
-4. Resolve new buffer (next 3 after serving):
-     Peek queue using same ratio rule, skip CANCELLED tokens
-     Mark peeked tokens → BUFFER
-5. BufferNotifier → signal the 3 buffer tokens to move to waiting area
-6. Update TokenQueue (serving_token_id, buffer_token_ids,
-                      consecutive_normal_served, version++)
-7. AuditLogger → log CALLED for serving token
+1. InternalStore.get_token(token_id)
+   → raise TokenNotFound if missing
 
-pick_next() rule:
-  if consecutive_normal_served < tatkal_ratio AND normal queue not empty:
-      serve next NORMAL, consecutive_normal_served += 1
-  elif tatkal queue not empty:
-      serve next TATKAL, consecutive_normal_served = 0
-  else:
-      serve whichever queue has WAITING patients (fallback)
-      if both empty: return QUEUE_EMPTY signal
+2. Validate token.status == WAITING
+   → raise TokenNotActive if not WAITING
+
+3. position = count of tokens in same session where
+              status == WAITING AND token_number < token.token_number
+
+4. Return position   (0 = next to be served)
 ```
 
-### 4.4 Slot System — View Available Slots
+### 4.4 SLOT — View Available Slots
 
 ```
 Input:  hospital_id, doctor_id, date
 
-1. DoctorValidator → confirm doctor belongs to hospital
-2. Query Slots WHERE doctor_id = ? AND date = ? AND status = AVAILABLE
-3. Return list ordered by start_time
+1. Validate doctor belongs to hospital
+   → raise DoctorNotFound if missing
+
+2. Return all Slots where
+     doctor_id == ? AND date == ? AND status == AVAILABLE
+   ordered by start_time asc
 ```
 
-### 4.5 Slot System — Book Slot
+### 4.5 SLOT — Book
 
 ```
 Input:  hospital_id, doctor_id, patient_id, slot_id
 
-1. PatientValidator → confirm patient exists
-2. DoctorValidator  → confirm doctor is active
-3. SlotStrategy
-     a. Check duplicate: no SCHEDULED appointment for (patient_id, doctor_id, date)
-     b. SELECT slot FOR UPDATE    ← row-level lock
-     c. Validate slot.status = AVAILABLE
-     d. UPDATE slot.status = BOOKED
-     e. INSERT Appointment (status = SCHEDULED)
-4. AuditLogger → log BOOKED
-5. Return appointment_id, slot start_time
+1. Validate patient exists
+   → raise PatientNotFound if missing
+
+2. Validate doctor is active
+   → raise DoctorNotFound if missing or inactive
+
+3. Check no SCHEDULED appointment for (patient_id, doctor_id, date)
+   → raise DuplicateBooking if exists
+
+4. InternalStore.get_slot(slot_id)
+   → raise SlotNotFound if missing
+   → raise SlotUnavailable if status != AVAILABLE
+
+5. slot.status = BOOKED
+   Create Appointment(status = SCHEDULED, booked_at = now)
+   InternalStore.save_slot(slot)
+   InternalStore.save_appointment(appointment)
+
+6. Return appointment_id, slot.start_time
 ```
 
-### 4.6 Slot System — Cancel
+### 4.6 SLOT — Cancel
 
 ```
-Input:  appointment_id, patient_id, cancellation_reason
+Input:  appointment_id, patient_id
 
-1. Fetch Appointment → validate patient_id matches
-2. Validate status = SCHEDULED
-3. Mark Appointment.status = CANCELLED, set cancelled_at, reason
-4. Mark Slot.status = AVAILABLE        ← freed back to pool
-5. AuditLogger → log CANCELLED
-6. Return confirmation (patient may rebook any available slot)
-```
+1. InternalStore.get_appointment(appointment_id)
+   → raise AppointmentNotFound if missing
 
-### 4.7 Slot System — Modify (atomic cancel + rebook)
+2. Validate appointment.patient_id == patient_id
+   → raise Unauthorised if mismatch
 
-```
-Input:  appointment_id, patient_id, new_slot_id
+3. Validate appointment.status == SCHEDULED
+   → raise AppointmentNotCancellable if already CANCELLED
 
-1. Fetch current Appointment → validate patient_id matches
-2. Validate current Appointment.status = SCHEDULED
-3. BEGIN TRANSACTION
-     a. SELECT new_slot FOR UPDATE
-     b. Validate new_slot.status = AVAILABLE
-     c. UPDATE old Slot.status = AVAILABLE
-     d. UPDATE current Appointment.status = CANCELLED
-     e. UPDATE new_slot.status = BOOKED
-     f. INSERT new Appointment (status = SCHEDULED)
-4. COMMIT
-5. AuditLogger → log MODIFIED (old_appointment_id → new_appointment_id)
-6. Return new appointment_id, new slot start_time
+4. appointment.status = CANCELLED
+   appointment.cancelled_at = now
+   slot.status = AVAILABLE
+   InternalStore.save_appointment(appointment)
+   InternalStore.save_slot(slot)
 
-On failure: ROLLBACK — old appointment remains SCHEDULED, old slot stays BOOKED
-```
-
----
-
-## 5. Error Cases
-
-### Token System
-
-| Scenario | Error Code | Behaviour |
-|---|---|---|
-| No active doctor session | `NO_ACTIVE_SESSION` | Reject booking |
-| Token status is BUFFER/SERVING/COMPLETED | `TOKEN_NOT_CANCELLABLE` | Reject cancel — too late |
-| Token already CANCELLED | `TOKEN_NOT_CANCELLABLE` | Reject cancel |
-| Doctor session closes mid-queue | `SESSION_CLOSED` | All WAITING + BUFFER tokens → CANCELLED |
-| Both queues empty on advance_buffer | `QUEUE_EMPTY` | Signal to doctor — no more patients |
-
-### Slot System
-
-| Scenario | Error Code | Behaviour |
-|---|---|---|
-| Slot already BOOKED (race condition) | `SLOT_UNAVAILABLE` | Row lock prevents double book — client re-fetches |
-| Slot is BLOCKED by admin | `SLOT_BLOCKED` | Reject booking |
-| New slot taken during modify | `SLOT_UNAVAILABLE` | Rollback — old appointment preserved |
-| Appointment already CANCELLED | `APPOINTMENT_NOT_MODIFIABLE` | Reject modify |
-| Duplicate booking (same doctor+date) | `DUPLICATE_BOOKING` | Reject — unique constraint on (patient_id, doctor_id, date) |
-
----
-
-## 6. Concurrency Rules
-
-### Token Counter — DB Sequence
-```sql
--- Created when DoctorSession is OPENED
-CREATE SEQUENCE token_seq_{session_id} START 1 INCREMENT 1;
-
--- Used on every token insert
-INSERT INTO tokens (..., token_number)
-VALUES (..., nextval('token_seq_{session_id}'));
-
--- Dropped when DoctorSession is CLOSED
-DROP SEQUENCE token_seq_{session_id};
-```
-Guarantees no two tokens in the same session share a number.
-
-### Slot Booking — Row-Level Lock
-```sql
-BEGIN;
-  SELECT * FROM slots WHERE slot_id = ? FOR UPDATE;
-  -- concurrent bookings queue behind this lock
-  UPDATE slots SET status = 'BOOKED' WHERE slot_id = ?;
-  INSERT INTO appointments (...);
-COMMIT;
--- Lock held < 10ms (no external calls inside transaction)
-```
-
-### TokenQueue State — Optimistic Lock
-```sql
-UPDATE token_queues
-SET serving_token_id = ?,
-    buffer_token_ids = ?,
-    consecutive_normal_served = ?,
-    version = version + 1
-WHERE queue_id = ? AND version = ?;
--- version mismatch → retry once → error
--- prevents two simultaneous advance_buffer calls corrupting queue state
+5. Return confirmation
 ```
 
 ---
 
-## 7. Session Lifecycle (Token System)
+## 5. Session Lifecycle (TOKEN mode)
 
 ```
 Doctor opens day:
-  → DoctorSession created (status = OPEN)
-  → TokenQueue initialised (empty, consecutive_normal_served = 0)
-  → DB sequence created for session
+  → Create DoctorSession(status = OPEN, started_at = now)
+  → Initialise session_counter[session_id] = 1
+  → InternalStore.save_session(session)
 
 Doctor closes day:
-  → DoctorSession.status = CLOSED, ended_at = now
-  → All WAITING tokens → CANCELLED (reason: SESSION_CLOSED)
-  → All BUFFER tokens → CANCELLED (reason: SESSION_CLOSED)
+  → session.status = CLOSED, ended_at = now
+  → All WAITING tokens for this session → CANCELLED
   → SERVING token completes naturally (not force-cancelled)
-  → DB sequence dropped
+  → session_counter[session_id] removed
+  → InternalStore.save_session(session)
 ```
 
 ---
 
-## 8. Design Patterns
+## 6. Error Cases
+
+### TOKEN mode
+
+| Scenario | Error Code | Behaviour |
+|---|---|---|
+| Patient not in store | `PATIENT_NOT_FOUND` | Reject booking |
+| No OPEN doctor session today | `NO_ACTIVE_SESSION` | Reject booking |
+| Token not found | `TOKEN_NOT_FOUND` | Reject cancel / position check |
+| Patient ID mismatch on token | `UNAUTHORISED` | Reject cancel |
+| Token status is SERVING / COMPLETED | `TOKEN_NOT_CANCELLABLE` | Reject cancel |
+| Doctor closes session mid-queue | `SESSION_CLOSED` | All WAITING tokens → CANCELLED |
+
+### SLOT mode
+
+| Scenario | Error Code | Behaviour |
+|---|---|---|
+| Patient not in store | `PATIENT_NOT_FOUND` | Reject booking |
+| Doctor not found or inactive | `DOCTOR_NOT_FOUND` | Reject booking / view |
+| Slot not found | `SLOT_NOT_FOUND` | Reject booking |
+| Slot already BOOKED or BLOCKED | `SLOT_UNAVAILABLE` | Reject booking |
+| Duplicate booking (same doctor + date) | `DUPLICATE_BOOKING` | Reject — one appointment per patient per doctor per day |
+| Appointment not found | `APPOINTMENT_NOT_FOUND` | Reject cancel |
+| Patient ID mismatch on appointment | `UNAUTHORISED` | Reject cancel |
+| Appointment already CANCELLED | `APPOINTMENT_NOT_CANCELLABLE` | Reject cancel |
+
+---
+
+## 7. Design Patterns
 
 | Pattern | Application |
 |---|---|
 | Strategy | `BookingStrategy` interface — `TokenStrategy` and `SlotStrategy` swap in based on `HospitalConfig.booking_mode` |
-| Optimistic Lock | `TokenQueue.version` guards against concurrent advance_buffer writes |
-| Pessimistic Lock | `SELECT FOR UPDATE` on Slot prevents race condition in slot booking |
-| Atomic Transaction | Modify flow wraps cancel + rebook in a single DB transaction |
-| Audit Log | Every state transition recorded in `AuditLog` with actor and timestamp |
-
----
-
-## 9. Open Questions / Review Notes
-
-### 9.1 Token Skip and Late Re-admission (Token System)
-
-**Scenario:** A patient receives a token and is placed in the BUFFER (pre-called to the waiting area), but is not physically present when the attender checks. The attender needs to skip that patient and move to the next token. Later, if the patient arrives, the attender should be able to re-insert them directly into the buffer — but only if their original token number is less than the currently serving token number (i.e., they were genuinely called earlier and missed their turn).
-
-**Proposed behaviour:**
-
-#### Skip Flow
-```
-skip_token(token_id, attender_id)
-
-1. Fetch Token → validate status = BUFFER (only buffered tokens can be skipped)
-2. Get attender confirmation (UI concern — flagged here as a required UX gate)
-3. Mark Token.status = SKIPPED
-4. Remove token_id from TokenQueue.buffer_token_ids
-5. Resolve next buffer slot: peek queue using ratio rule, add replacement to buffer
-6. BufferNotifier → notify replacement token
-7. Update TokenQueue (buffer_token_ids, version++)
-8. AuditLogger → log SKIPPED, actor = attender_id
-```
-
-New token status required: `SKIPPED` — add to `TokenStatus` enum between `BUFFER` and `CANCELLED`.
-
-#### Late Re-admission Flow
-```
-reinstate_to_buffer(token_id, attender_id)
-
-1. Fetch Token → validate status = SKIPPED
-2. Fetch TokenQueue → validate token.token_number < serving_token.token_number
-   (patient was called before the current patient — genuinely missed their turn)
-3. If TokenQueue.buffer_token_ids has < 3 entries:
-     Mark Token.status = BUFFER
-     Append token_id to TokenQueue.buffer_token_ids
-     BufferNotifier → notify patient
-     Update TokenQueue (version++)
-     AuditLogger → log REINSTATED, actor = attender_id
-4. If buffer already full (3 tokens):
-     Reject with BUFFER_FULL error — attender must wait for a slot to open
-```
-
-**Constraints:**
-- Only attender role can call `skip_token` and `reinstate_to_buffer` (not patient-initiated)
-- Re-admission is only valid when `token.token_number < current_serving_token_number` — prevents abuse (patient cannot be re-admitted if their token hasn't been reached yet)
-- A SKIPPED token cannot be re-skipped or cancelled — it can only be reinstated or left as SKIPPED (expires at session close)
-
-**Impact on session close:**
-- SKIPPED tokens at session close → mark as CANCELLED with reason `SESSION_CLOSED` (same as WAITING/BUFFER)
-
-**Open items — confirmation needed:**
-- [ ] Should the attender confirmation (step 2 of skip flow) be enforced at the API level (e.g., a required `confirmed: true` flag in the request) or is it purely a UI concern?
-- [ ] If the buffer is full when a skipped patient returns, should the system allow the attender to manually bump one buffer token back to WAITING to make room?
-- [ ] Maximum number of times a token can be skipped and reinstated (should there be a limit, e.g., max 2 reinstatements per token)?
+| In-memory store | All state in `InternalStore`; no DB or persistence layer |
+| FIFO ordering | Token queue is pure sequential — token_number determines order |
+| Fail-fast validation | Patient, doctor, and slot checks run before any state mutation |
