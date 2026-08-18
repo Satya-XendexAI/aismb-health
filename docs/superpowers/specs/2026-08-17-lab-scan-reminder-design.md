@@ -8,11 +8,9 @@
 
 ## 1. Overview
 
-The Lab Test & Scan Reminder Service sends a single reminder per patient grouping all their due lab tests and scans into one WhatsApp message. Test order data is managed directly in the DB from the backend — no external order system or registration flow. The service exposes a single `evaluate(now)` method that groups due orders by patient and sends one reminder per patient per day.
+The Lab Test & Scan Reminder Service is triggered manually (e.g., by a staff member or admin action). When triggered, it finds all patients who have pending test orders with no reminder sent yet, groups their orders into one WhatsApp message per patient, and sends it.
 
-State is persisted in a SQL database via a `Repository` layer.
-
-The service is driven by an external caller invoking `evaluate(now)` on a configurable schedule. It holds no internal timer threads.
+Test order data is managed directly in the DB from the backend. State is persisted in SQL via a `Repository` layer.
 
 ---
 
@@ -22,7 +20,7 @@ The service is driven by an external caller invoking `evaluate(now)` on a config
 ┌─────────────────────────────────────────────────────────┐
 │               LabScanReminderService                     │
 │                                                         │
-│  + evaluate(now: datetime) → None          ← tick       │
+│  + send_reminders() → ReminderSummary   ← manual call   │
 │                                                         │
 │  [ notifier injected at construction ]                  │
 └──────────────┬──────────────────────────────────────────┘
@@ -36,7 +34,7 @@ The service is driven by an external caller invoking `evaluate(now)` on a config
 
 **Components:**
 
-- `ReminderNotifier` — sends reminder messages to patients via WhatsApp. `InMemoryReminderNotifier` with `should_fail` flag for tests.
+- `ReminderNotifier` — sends WhatsApp messages. `InMemoryReminderNotifier` with `should_fail` flag for tests.
 - `Repository` — reads `test_orders` and writes `reminder_records` to SQL DB.
 
 `LabScanReminderService` holds no mutable state itself.
@@ -54,49 +52,54 @@ test_orders                              -- populated and managed by backend
   hospital_id        UUID
   test_name          str               e.g. "CBC", "MRI Brain"
   test_type          Enum              LAB | SCAN
-  due_date           date              patient must complete by this date
+  due_date           date
   preparation_notes  str               e.g. "Fast for 8 hours before the test"
-  remind_hours_before int              hours before due_date to fire; default 24
 
-reminder_records                         -- written by the service; one per patient per day
+reminder_records                         -- written by the service; one per patient per trigger
   reminder_id        UUID        PK
   patient_id         UUID
-  reminder_date      date              the calendar day this reminder covers
+  triggered_at       datetime          when send_reminders() was called
   status             Enum        SENT | FAILED
   fired_at           datetime
 ```
 
-**Idempotency key:** `(patient_id, reminder_date)` — one reminder per patient per day. `evaluate()` skips a patient if a row already exists for today.
+**Idempotency key:** `patient_id` — if a SENT record already exists for a patient, they are skipped on subsequent triggers. FAILED records are retried on the next trigger.
 
 ---
 
 ## 4. Core Flow
 
-### 4.1 evaluate(now: datetime)
+### 4.1 send_reminders() → ReminderSummary
 
 ```
-1. Fetch due orders:
-   SELECT * FROM test_orders
-   WHERE (due_date - remind_hours_before * interval '1 hour') <= now
+1. Find patients with pending orders:
+   SELECT DISTINCT patient_id FROM test_orders
+   WHERE patient_id NOT IN (
+     SELECT patient_id FROM reminder_records WHERE status = 'SENT'
+   )
 
-2. Group by patient_id
+2. For each patient_id:
 
-3. For each patient_id group:
-
-     a. Check no existing reminder_records row for (patient_id, now.date())
-        → skip if already sent today (idempotency)
+     a. Fetch their orders:
+        SELECT * FROM test_orders WHERE patient_id = ?
 
      b. status = 'SENT'
         try:
           ReminderNotifier.send_reminder(
             patient_id = patient_id,
-            orders     = [{ test_name, due_date, prep_notes } for each order in group]
+            orders     = [{ test_name, due_date, prep_notes } for each order]
           )
         except Exception:
           status = 'FAILED'
 
-     c. INSERT INTO reminder_records(patient_id, reminder_date = now.date(),
+     c. INSERT INTO reminder_records(patient_id, triggered_at = now,
                                      status, fired_at = now)
+
+3. Return ReminderSummary(
+     total_patients  = count of patients processed,
+     sent            = count where status = SENT,
+     failed          = count where status = FAILED
+   )
 ```
 
 ---
@@ -105,7 +108,7 @@ reminder_records                         -- written by the service; one per pati
 
 | Scenario | Error Code | Behaviour |
 |---|---|---|
-| `ReminderNotifier.send_reminder` raises | _(no raise)_ | `reminder_records.status = FAILED`; `evaluate()` continues to next order |
+| `ReminderNotifier.send_reminder` raises | _(no raise)_ | `reminder_records.status = FAILED`; continues to next patient; retried on next trigger |
 
 ---
 
@@ -113,7 +116,7 @@ reminder_records                         -- written by the service; one per pati
 
 | Pattern | Application |
 |---|---|
-| DB-managed data | Test orders created and managed by backend; service reads them directly — no adapter or registration flow |
-| Evaluate-on-tick | `evaluate(now)` called externally; time injected for deterministic tests |
-| Idempotency | `(patient_id, reminder_date)` existence check prevents double-send on repeated ticks |
-| Fire-and-forget | Reminders best-effort; FAILED rows logged but not retried |
+| DB-managed data | Test orders created and managed by backend; service reads them directly |
+| Manual trigger | `send_reminders()` called on demand — no scheduler or tick needed |
+| Idempotency | Patients with existing SENT record skipped; FAILED records retried on next trigger |
+| Fire-and-forget | Reminders best-effort; FAILED rows logged and retried on next call |
