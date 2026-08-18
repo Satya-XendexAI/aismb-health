@@ -8,9 +8,18 @@
 
 ## 1. Overview
 
-The Post-Visit Follow-up Service checks patient well-being after a visit, discharge, or procedure. It sends a configurable sequence of follow-up questionnaire rounds at set intervals post-discharge. Each round delivers questions one at a time; when all answers are collected, triage rules are evaluated. Red-flag responses trigger a `NurseTask` and a notification to the task system.
+The Post-Visit Follow-up Service checks patient well-being after a visit, discharge, or procedure. It supports two patient types:
 
-All external dependencies (EMR, questionnaire config, triage rules, WhatsApp, nurse task system) are behind swappable adapter interfaces. In-memory stubs are used for standalone development and testing.
+| Patient Type | Anchor Time | Follow-up Mode |
+|---|---|---|
+| `INPATIENT` | `visit_ended_at` (mapped from EMR `discharged_at`) | Multi-round questionnaire; red-flag triage; NurseTask on triggers |
+| `OUTPATIENT` | `visit_ended_at` (mapped from EMR `consultation_ended_at`) | Single reminder message (configurable to multiple); no questionnaire; no triage |
+
+For inpatients, the service sends a configurable sequence of questionnaire rounds at set intervals post-discharge. Each round delivers questions one at a time; when all answers are collected, triage rules are evaluated. Red-flag responses trigger a `NurseTask` and a notification to the task system.
+
+For outpatients, the doctor's recommended follow-up interval is extracted from free-text consultation notes by an LLM adapter. If no interval is found, a configurable default (168 hours / 7 days) is used. At the due time the service sends a single plain-text reminder message — no questions, no triage.
+
+All external dependencies (EMR, questionnaire config, triage rules, WhatsApp, nurse task system, LLM extractor) are behind swappable adapter interfaces. In-memory stubs are used for standalone development and testing.
 
 The service is driven by an external caller invoking `evaluate(now)` on a configurable schedule. It holds no internal timer threads.
 
@@ -31,24 +40,26 @@ The service is driven by an external caller invoking `evaluate(now)` on a config
 │  [ adapters injected at construction time ]                  │
 └─────────────────┬────────────────────────────────────────────┘
                   │ uses
-   ┌──────────────┼────────────────┬──────────────────┐
-   ▼              ▼                ▼                  ▼
-EncounterProvider  QuestionnaireProvider  TriageRulesProvider
-(external — EMR)   (external — mock)      (external — mock)
+   ┌──────────────┼────────────────┬──────────────────┬─────────────────────┐
+   ▼              ▼                ▼                  ▼                     ▼
+EncounterProvider  QuestionnaireProvider  TriageRulesProvider  FollowUpIntervalExtractor
+(external — EMR)   (external — mock)      (external — mock)    (external — LLM)
 
           ┌────────────────────┬────────────────┐
           ▼                    ▼                ▼
    PatientNotifier        TaskNotifier     InternalStore
    (external — WhatsApp)  (external —      (owned by service)
-                           task system)
+   send_question()        task system)
+   send_reminder() ← OPD
 ```
 
 **Components:**
 
 - `EncounterProvider` — fetches encounter/discharge data from EMR. `InMemoryEncounterProvider` returns hardcoded data.
-- `QuestionnaireProvider` — returns ordered `Question` list per encounter type. `InMemoryQuestionnaireProvider` for tests.
-- `TriageRulesProvider` — returns triage rules per encounter type. Each rule maps a `(question_id, trigger_answer)` pair to an urgency level. `InMemoryTriageRulesProvider` for tests.
-- `PatientNotifier` — sends questions to patient one at a time (WhatsApp-targeted, isolated). `InMemoryPatientNotifier` with `should_fail` flag.
+- `QuestionnaireProvider` — returns ordered `Question` list per encounter type. `InMemoryQuestionnaireProvider` for tests. Used for INPATIENT sessions only.
+- `TriageRulesProvider` — returns triage rules per encounter type. Each rule maps a `(question_id, trigger_answer)` pair to an urgency level. `InMemoryTriageRulesProvider` for tests. Used for INPATIENT sessions only.
+- `FollowUpIntervalExtractor` — extracts a follow-up interval in hours from free-text consultation notes. Production impl calls an LLM (e.g., "review in 3 days" → `72`, "2 weeks" → `336`). Returns `None` if no interval is found. `InMemoryFollowUpIntervalExtractor` returns a configurable fixed value or `None`. Used for OUTPATIENT encounters only.
+- `PatientNotifier` — sends questions or reminders to patients (WhatsApp-targeted, isolated). `send_question` used for INPATIENT sessions; `send_reminder` used for OUTPATIENT sessions. `InMemoryPatientNotifier` with `should_fail` flag stubs both methods.
 - `TaskNotifier` — notifies nurse task system when a `NurseTask` is created. `InMemoryTaskNotifier` with `should_fail` flag.
 - `InternalStore` — owns all mutable state: schedules, sessions, answers, nurse tasks. `InMemoryInternalStore` for tests.
 
@@ -67,7 +78,10 @@ Encounter                               -- from EncounterProvider
   hospital_id        UUID
   encounter_type     str                e.g. "OPD", "SURGERY", "DISCHARGE"
   attending_doctor   UUID
-  discharged_at      datetime
+  patient_type       Enum               INPATIENT | OUTPATIENT
+  visit_ended_at     datetime           discharged_at for INPATIENT;
+                                        consultation_ended_at for OUTPATIENT
+  consultation_notes str?               free-text notes; populated for OUTPATIENT only
 
 Question                                -- from QuestionnaireProvider
   question_id        UUID
@@ -93,7 +107,9 @@ FollowUpSchedule
   patient_id              UUID
   hospital_id             UUID
   encounter_type          str
-  round_intervals_hours   List[int]    e.g. [24, 72] — hours post-discharge per round
+  patient_type            Enum         INPATIENT | OUTPATIENT
+  round_intervals_hours   List[int]    INPATIENT: e.g. [24, 72]
+                                       OUTPATIENT: e.g. [168] (extracted or default)
   current_round           int          0-based index; increments when a round session is created
   status                  Enum         ACTIVE | COMPLETED | CANCELLED
   created_at              datetime
@@ -104,8 +120,9 @@ QuestionnaireSession
   encounter_id            UUID
   patient_id              UUID
   round_number            int          1-based
-  questions               List[UUID]   ordered question_ids for this session
-  current_question_index  int          0-based; advances on each answer
+  session_type            Enum         QUESTIONNAIRE | REMINDER
+  questions               List[UUID]   ordered question_ids; empty for REMINDER sessions
+  current_question_index  int          0-based; advances on each answer; always 0 for REMINDER
   status                  Enum         PENDING | IN_PROGRESS | COMPLETED | NO_RESPONSE
   started_at              datetime?
   completed_at            datetime?
@@ -138,17 +155,19 @@ NextQuestion                           -- return value of submit_answer when mor
 FollowUpReport                         -- return value of get_followup_report
   encounter_id            UUID
   patient_id              UUID
+  patient_type            Enum         INPATIENT | OUTPATIENT
   total_rounds            int
   completed_rounds        int
   no_response_rounds      int
-  red_flags_detected      bool
-  nurse_task              NurseTask | None
+  red_flags_detected      bool         always False for OUTPATIENT
+  nurse_task              NurseTask | None   always None for OUTPATIENT
 ```
 
 **Key rules:**
 - One `FollowUpSchedule` per encounter. `register_encounter` twice raises `DUPLICATE_ENCOUNTER`.
 - One `QuestionnaireSession` per round. `evaluate()` creates sessions lazily when a round is due.
-- `current_question_index` advances per `submit_answer`. When it reaches `len(questions)`, session becomes `COMPLETED` and triage runs immediately.
+- QUESTIONNAIRE sessions: `current_question_index` advances per `submit_answer`. When it reaches `len(questions)`, session becomes `COMPLETED` and triage runs immediately.
+- REMINDER sessions: `questions` is empty; session goes PENDING → COMPLETED immediately after `_send_reminder`. No `submit_answer` is valid on a REMINDER session.
 - `NurseTask.urgency` = highest urgency across all triggered rules. Urgency order: `LOW < MEDIUM < HIGH < CRITICAL`.
 - A session expires if `now > expires_at` and status is still `PENDING` or `IN_PROGRESS` — marked `NO_RESPONSE` on next `evaluate()` tick.
 - `NurseTask` is created once per session — guarded by checking for an existing task for `session_id` before creating.
@@ -168,15 +187,30 @@ Input: encounter_id
 2. InternalStore.get_schedule_by_encounter(encounter_id)
    → raise DuplicateEncounter if schedule already exists
 
-3. Create FollowUpSchedule(
+3. Determine round_intervals_hours:
+
+   If encounter.patient_type == OUTPATIENT:
+     interval = FollowUpIntervalExtractor.extract_interval_hours(
+                  encounter.consultation_notes, encounter.encounter_type)
+     if interval is None:
+       interval = default_opd_interval_hours   ← configurable; default 168 (7 days)
+     round_intervals_hours = [interval]         ← default single round; pass opd_round_multipliers
+                                                   (e.g. [1, 2]) at construction to get
+                                                   [interval, interval*2, ...] for multiple rounds
+
+   Else (INPATIENT):
+     round_intervals_hours = [24, 72]           ← configurable at construction
+
+4. Create FollowUpSchedule(
+     patient_type = encounter.patient_type,
      encounter_type = encounter.encounter_type,
-     round_intervals_hours = [24, 72],   ← configurable at service construction
+     round_intervals_hours = round_intervals_hours,
      current_round = 0,
      status = ACTIVE,
      created_at = now
    )
-4. InternalStore.save_schedule(schedule)
-5. Return schedule
+5. InternalStore.save_schedule(schedule)
+6. Return schedule
 ```
 
 ### 4.2 evaluate(now: datetime)
@@ -196,24 +230,41 @@ For each ACTIVE FollowUpSchedule:
   B. Fire next round if due
      if schedule.current_round < len(schedule.round_intervals_hours):
        interval = schedule.round_intervals_hours[schedule.current_round]
-       round_due_at = encounter.discharged_at + timedelta(hours=interval)
+       round_due_at = encounter.visit_ended_at + timedelta(hours=interval)
 
        if round_due_at <= now:
          existing = InternalStore.get_session_by_round(schedule_id, schedule.current_round + 1)
          if existing is None:
-           questions = QuestionnaireProvider.get_questions(encounter.encounter_type)
-           → raise NoQuestionsConfigured if list is empty
-           Create QuestionnaireSession(
-             round_number = schedule.current_round + 1,
-             questions = [q.question_id for q in questions],
-             current_question_index = 0,
-             status = PENDING,
-             expires_at = now + timedelta(hours=session_expiry_hours)
-           )
-           InternalStore.save_session(session)
-           schedule.current_round += 1
-           InternalStore.save_schedule(schedule)
-           _send_question(session, questions[0], now)
+
+           If schedule.patient_type == OUTPATIENT:
+             Create QuestionnaireSession(
+               session_type = REMINDER,
+               round_number = schedule.current_round + 1,
+               questions = [],
+               current_question_index = 0,
+               status = PENDING,
+               expires_at = now + timedelta(hours=session_expiry_hours)
+             )
+             InternalStore.save_session(session)
+             schedule.current_round += 1
+             InternalStore.save_schedule(schedule)
+             _send_reminder(session, now)
+
+           Else (INPATIENT):
+             questions = QuestionnaireProvider.get_questions(encounter.encounter_type)
+             → raise NoQuestionsConfigured if list is empty
+             Create QuestionnaireSession(
+               session_type = QUESTIONNAIRE,
+               round_number = schedule.current_round + 1,
+               questions = [q.question_id for q in questions],
+               current_question_index = 0,
+               status = PENDING,
+               expires_at = now + timedelta(hours=session_expiry_hours)
+             )
+             InternalStore.save_session(session)
+             schedule.current_round += 1
+             InternalStore.save_schedule(schedule)
+             _send_question(session, questions[0], now)
 
   C. Mark schedule COMPLETED when all rounds done
      if schedule.current_round == len(schedule.round_intervals_hours):
@@ -221,6 +272,18 @@ For each ACTIVE FollowUpSchedule:
        if last_session and last_session.status in (COMPLETED, NO_RESPONSE):
          schedule.status = COMPLETED
          InternalStore.save_schedule(schedule)
+
+_send_reminder(session, now):
+  message = reminder_message_template   ← configurable at construction;
+                                          default: "Your doctor has recommended a follow-up.
+                                          Please visit the hospital or contact us."
+  try:
+    PatientNotifier.send_reminder(session.patient_id, session.session_id, message)
+  except Exception:
+    pass  ← best-effort; same pattern as send_question
+  session.status = COMPLETED
+  session.completed_at = now
+  InternalStore.save_session(session)
 
 _send_question(session, question, now):
   session.started_at = session.started_at or now
@@ -243,29 +306,32 @@ Input: session_id, patient_id, question_id, answer
 2. Validate session.patient_id == patient_id
    → raise Unauthorised if mismatch
 
-3. Validate session.status in (PENDING, IN_PROGRESS)
+3. Validate session.session_type == QUESTIONNAIRE
+   → raise OperationNotSupported if REMINDER
+
+4. Validate session.status in (PENDING, IN_PROGRESS)
    → raise SessionNotActive if COMPLETED | NO_RESPONSE
 
-4. Validate question_id == session.questions[session.current_question_index]
+5. Validate question_id == session.questions[session.current_question_index]
    → raise WrongQuestion if mismatch
 
-5. Create QuestionAnswer(
+6. Create QuestionAnswer(
      question_id=question_id, answer=answer,
      is_red_flag=False, answered_at=now
    )
    InternalStore.save_answer(answer_record)
 
-6. session.current_question_index += 1
+7. session.current_question_index += 1
    session.status = IN_PROGRESS
    InternalStore.save_session(session)
 
-7. If session.current_question_index < len(session.questions):
+8. If session.current_question_index < len(session.questions):
      next_q_id = session.questions[session.current_question_index]
      next_q = QuestionnaireProvider.get_question(next_q_id)
      _send_question(session, next_q, now)
      Return NextQuestion(question_id=next_q_id, text=next_q.text, answer_type=next_q.answer_type)
 
-8. Else (all questions answered):
+9. Else (all questions answered):
      session.status = COMPLETED
      session.completed_at = now
      InternalStore.save_session(session)
@@ -273,7 +339,7 @@ Input: session_id, patient_id, question_id, answer
      Return None
 ```
 
-### 4.4 _run_triage(session) [internal]
+### 4.4 _run_triage(session) [internal — INPATIENT only]
 
 ```
 1. answers = InternalStore.get_answers(session.session_id)
@@ -326,10 +392,12 @@ Input: encounter_id
 
 2. sessions = InternalStore.get_sessions(schedule_id)
 3. nurse_task = InternalStore.get_task_by_encounter(encounter_id)
+   (always None for OUTPATIENT — _run_triage is never called)
 
 4. Return FollowUpReport(
      encounter_id = encounter_id,
      patient_id = schedule.patient_id,
+     patient_type = schedule.patient_type,
      total_rounds = len(schedule.round_intervals_hours),
      completed_rounds = count(s for s in sessions if s.status == COMPLETED),
      no_response_rounds = count(s for s in sessions if s.status == NO_RESPONSE),
@@ -346,12 +414,14 @@ Input: encounter_id
 |---|---|---|
 | Encounter not found in EMR | `ENCOUNTER_NOT_FOUND` | Raise on `register_encounter` and `get_followup_report` |
 | Schedule already exists for encounter | `DUPLICATE_ENCOUNTER` | Raise on `register_encounter` |
-| No questions configured for encounter type | `NO_QUESTIONS_CONFIGURED` | Raise inside `evaluate()` on session creation |
+| No questions configured for encounter type | `NO_QUESTIONS_CONFIGURED` | Raise inside `evaluate()` on INPATIENT session creation |
 | `submit_answer` — session not found | `SESSION_NOT_FOUND` | Raise |
 | `submit_answer` — patient_id mismatch | `UNAUTHORISED` | Raise |
+| `submit_answer` — called on a REMINDER session | `OPERATION_NOT_SUPPORTED` | Raise — OPD reminders have no answer flow |
 | `submit_answer` — session COMPLETED or NO_RESPONSE | `SESSION_NOT_ACTIVE` | Raise |
 | `submit_answer` — wrong question_id for current position | `WRONG_QUESTION` | Raise — patient must answer in order |
 | `PatientNotifier.send_question` raises | _(no raise)_ | Best-effort; session state saved; patient misses question but session remains IN_PROGRESS |
+| `PatientNotifier.send_reminder` raises | _(no raise)_ | Best-effort; session still marked COMPLETED |
 | `TaskNotifier.notify_task_created` raises | _(no raise)_ | `NurseTask` saved with status `OPEN`; retry is task system's responsibility |
 
 ---
@@ -359,7 +429,8 @@ Input: encounter_id
 ## 6. Concurrency and Idempotency
 
 **evaluate() idempotency:**
-- Session creation guarded by `get_session_by_round(schedule_id, round_number)` — calling `evaluate()` twice at the same `now` creates no duplicate sessions.
+- Session creation guarded by `get_session_by_round(schedule_id, round_number)` — calling `evaluate()` twice at the same `now` creates no duplicate sessions for either patient type.
+- `FollowUpIntervalExtractor` is called only in `register_encounter`, which is guarded by `DUPLICATE_ENCOUNTER` — extractor never runs twice for the same encounter.
 - Session expiry is idempotent — marking `NO_RESPONSE` twice is a no-op.
 
 **submit_answer idempotency:** Submitting the same answer twice raises `WRONG_QUESTION` on the second call (index has already advanced).
@@ -372,11 +443,11 @@ Input: encounter_id
 
 | Pattern | Application |
 |---|---|
-| Adapter | `EncounterProvider`, `QuestionnaireProvider`, `TriageRulesProvider`, `PatientNotifier`, `TaskNotifier` — all swappable behind ABCs |
+| Adapter | `EncounterProvider`, `QuestionnaireProvider`, `TriageRulesProvider`, `PatientNotifier`, `TaskNotifier`, `FollowUpIntervalExtractor` — all swappable behind ABCs |
 | Evaluate-on-tick | `evaluate(now)` called externally; time injected for deterministic tests |
-| Session state machine | `QuestionnaireSession` status: `PENDING → IN_PROGRESS → COMPLETED / NO_RESPONSE` |
+| Session state machine | `QuestionnaireSession` status: QUESTIONNAIRE — `PENDING → IN_PROGRESS → COMPLETED / NO_RESPONSE`; REMINDER — `PENDING → COMPLETED / NO_RESPONSE` |
 | Lazy session creation | Sessions created only when their round interval is due, not precomputed |
-| Best-effort notifications | `PatientNotifier` and `TaskNotifier` failures are caught and logged — service state is saved first |
+| Best-effort notifications | `PatientNotifier` and `TaskNotifier` failures are caught — service state is saved first |
 
 ---
 
@@ -385,3 +456,6 @@ Input: encounter_id
 - Should a `NO_RESPONSE` round block subsequent rounds (patient clearly disengaged), or should all rounds fire regardless? Current design: rounds fire on schedule regardless of prior `NO_RESPONSE`.
 - Should the attender be able to manually close a `NurseTask` via this service, or is that entirely the task system's responsibility? Current design: task closure is out of scope — this service only creates tasks.
 - If `PatientNotifier` fails to send a question, should `evaluate()` retry on the next tick? Current design: no retry — session remains `IN_PROGRESS` until it expires.
+- Should the OPD reminder message be personalised with the doctor's name or the specific recommended return date? Current design: generic configurable template only.
+- If the LLM extractor returns an interval with low confidence, should it fall back to the default or proceed? Current design: any returned value is used as-is; confidence thresholding is the extractor's internal responsibility.
+- Should multiple OPD rounds (when configured) use the same extracted interval as spacing between rounds, or re-extract from notes each time? Current design: interval extracted once at `register_encounter`; all rounds use equal spacing from that value.
