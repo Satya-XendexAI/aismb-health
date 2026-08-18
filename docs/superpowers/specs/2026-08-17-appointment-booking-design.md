@@ -1,6 +1,6 @@
 # Appointment Booking System — Design Spec
 
-**Date:** 2026-08-17 (revised 2026-08-18)
+**Date:** 2026-08-17 (revised 2026-08-18 ×2)
 **Scope:** Backend LLD only — no UI/channel integration
 **Status:** Approved
 
@@ -15,7 +15,7 @@ The appointment booking system supports two operating modes, configured per hosp
 | `TOKEN` | Walk-in queue. Patients receive a sequential token and wait in FIFO order. |
 | `SLOT` | Pre-configured fixed time slots per doctor per day. Patients select and book an available slot. |
 
-All state is held in-memory. No database or external persistence.
+All state is persisted in a SQL database via a `Repository` layer. Strategies interact with the DB only through `Repository` — no raw SQL in business logic.
 
 ---
 
@@ -44,95 +44,94 @@ All state is held in-memory. No database or external persistence.
    └──────┬──────┘      └───────┬───────┘
           └──────────┬──────────┘
                      ▼
-               InternalStore
-               (in-memory; owned by engine)
+               Repository
+               (SQL DB — Postgres)
 ```
 
-**HospitalConfig** — holds `hospital_id`, `name`, and `booking_mode`. Engine reads this at construction and injects the correct strategy. No DB row — passed in directly.
+**HospitalConfig** — stored as a `hospitals` table row. Engine reads `booking_mode` at startup via `Repository.get_hospital(hospital_id)` and injects the correct strategy.
 
 ---
 
 ## 3. Data Models
 
-### 3.1 Config (passed at construction)
+### 3.1 DB Tables — Shared
 
 ```
-HospitalConfig
-  hospital_id       UUID
+hospitals
+  hospital_id       UUID        PK
   name              str
   booking_mode      Enum        TOKEN | SLOT
-```
 
-### 3.2 Shared Entities (in InternalStore)
-
-```
-Patient
+patients
   patient_id        UUID        PK
-  hospital_id       UUID
+  hospital_id       UUID        FK → hospitals
   name              str
   phone             str
 
-Doctor
+doctors
   doctor_id         UUID        PK
-  hospital_id       UUID
+  hospital_id       UUID        FK → hospitals
   name              str
   specialization    str
   is_active         bool
 
-DoctorSession                        -- tracks a doctor's active consultation day
+doctor_sessions                      -- one row per doctor per working day
   session_id        UUID        PK
-  doctor_id         UUID
-  hospital_id       UUID
+  doctor_id         UUID        FK → doctors
+  hospital_id       UUID        FK → hospitals
   date              Date
   status            Enum        OPEN | CLOSED
   started_at        datetime
   ended_at          datetime?
+
+  UNIQUE (doctor_id, date)           -- one session per doctor per day
 ```
 
-### 3.3 Token-Mode Entities
+### 3.2 DB Tables — TOKEN mode
 
 ```
-Token
+tokens
   token_id          UUID        PK
-  session_id        UUID        FK → DoctorSession
-  patient_id        UUID
-  doctor_id         UUID
-  hospital_id       UUID
-  token_number      int         sequential; assigned by in-memory counter per session
+  session_id        UUID        FK → doctor_sessions
+  patient_id        UUID        FK → patients
+  doctor_id         UUID        FK → doctors
+  hospital_id       UUID        FK → hospitals
+  token_number      int         assigned via DB sequence per session (see §6)
   status            Enum        WAITING | SERVING | COMPLETED | CANCELLED
   issued_at         datetime
   called_at         datetime?
   served_at         datetime?
 ```
 
-**Token counter:** An in-memory integer counter, one per session, starting at 1 and incrementing on each `book()` call. Counter is reset when the session closes.
+**Token number:** Assigned using a per-session DB sequence (`token_seq_{session_id}`), guaranteeing uniqueness and strict ordering with no gaps from concurrent inserts.
 
-**Queue position:** Count of WAITING tokens with `token_number < this token's token_number` in the same session.
+**Queue position:** `SELECT COUNT(*) FROM tokens WHERE session_id = ? AND status = 'WAITING' AND token_number < ?`
 
-### 3.4 Slot-Mode Entities
+### 3.3 DB Tables — SLOT mode
 
 ```
-Slot
+slots
   slot_id           UUID        PK
-  hospital_id       UUID
-  doctor_id         UUID
+  hospital_id       UUID        FK → hospitals
+  doctor_id         UUID        FK → doctors
   date              Date
   start_time        Time        e.g. 09:00
   end_time          Time        e.g. 09:20
   status            Enum        AVAILABLE | BOOKED | BLOCKED
 
-Appointment
+appointments
   appointment_id    UUID        PK
-  hospital_id       UUID
-  patient_id        UUID
-  doctor_id         UUID
-  slot_id           UUID        FK → Slot
+  hospital_id       UUID        FK → hospitals
+  patient_id        UUID        FK → patients
+  doctor_id         UUID        FK → doctors
+  slot_id           UUID        FK → slots
   status            Enum        SCHEDULED | CANCELLED
   booked_at         datetime
   cancelled_at      datetime?
-```
 
-**Uniqueness rule:** One `SCHEDULED` appointment per `(patient_id, doctor_id, date)` — enforced in-memory before booking.
+  UNIQUE (patient_id, doctor_id, date) WHERE status = 'SCHEDULED'
+    -- DB partial unique index; prevents same patient booking same doctor twice on same day
+```
 
 ---
 
@@ -143,19 +142,21 @@ Appointment
 ```
 Input:  hospital_id, doctor_id, patient_id
 
-1. Validate patient exists in InternalStore
+1. SELECT patient FROM patients WHERE patient_id = ? AND hospital_id = ?
    → raise PatientNotFound if missing
 
-2. Validate DoctorSession is OPEN today for this doctor + hospital
+2. SELECT session FROM doctor_sessions WHERE doctor_id = ? AND hospital_id = ?
+     AND date = today AND status = 'OPEN'
    → raise NoActiveSession if not found
 
-3. Assign token_number = session_counter[session_id]++
+3. token_number = nextval('token_seq_{session_id}')   ← DB sequence, atomic
 
-4. Create Token(status = WAITING, issued_at = now)
-   InternalStore.save_token(token)
+4. INSERT tokens(token_number, status = WAITING, issued_at = now)
 
 5. Return token_number,
-          queue_position = count of WAITING tokens with token_number < this token's
+          queue_position = SELECT COUNT(*) FROM tokens
+                           WHERE session_id = ? AND status = 'WAITING'
+                             AND token_number < token_number
 ```
 
 ### 4.2 TOKEN — Cancel
@@ -163,7 +164,7 @@ Input:  hospital_id, doctor_id, patient_id
 ```
 Input:  token_id, patient_id
 
-1. InternalStore.get_token(token_id)
+1. SELECT * FROM tokens WHERE token_id = ?
    → raise TokenNotFound if missing
 
 2. Validate token.patient_id == patient_id
@@ -172,8 +173,7 @@ Input:  token_id, patient_id
 3. Validate token.status == WAITING
    → raise TokenNotCancellable if SERVING | COMPLETED | CANCELLED
 
-4. token.status = CANCELLED
-   InternalStore.save_token(token)
+4. UPDATE tokens SET status = 'CANCELLED' WHERE token_id = ?
 
 5. Return confirmation
 ```
@@ -183,14 +183,16 @@ Input:  token_id, patient_id
 ```
 Input:  token_id
 
-1. InternalStore.get_token(token_id)
+1. SELECT * FROM tokens WHERE token_id = ?
    → raise TokenNotFound if missing
 
 2. Validate token.status == WAITING
    → raise TokenNotActive if not WAITING
 
-3. position = count of tokens in same session where
-              status == WAITING AND token_number < token.token_number
+3. position = SELECT COUNT(*) FROM tokens
+              WHERE session_id = token.session_id
+                AND status = 'WAITING'
+                AND token_number < token.token_number
 
 4. Return position   (0 = next to be served)
 ```
@@ -200,12 +202,12 @@ Input:  token_id
 ```
 Input:  hospital_id, doctor_id, date
 
-1. Validate doctor belongs to hospital
+1. SELECT * FROM doctors WHERE doctor_id = ? AND hospital_id = ?
    → raise DoctorNotFound if missing
 
-2. Return all Slots where
-     doctor_id == ? AND date == ? AND status == AVAILABLE
-   ordered by start_time asc
+2. SELECT * FROM slots
+   WHERE doctor_id = ? AND date = ? AND status = 'AVAILABLE'
+   ORDER BY start_time ASC
 ```
 
 ### 4.5 SLOT — Book
@@ -213,25 +215,29 @@ Input:  hospital_id, doctor_id, date
 ```
 Input:  hospital_id, doctor_id, patient_id, slot_id
 
-1. Validate patient exists
+1. SELECT * FROM patients WHERE patient_id = ? AND hospital_id = ?
    → raise PatientNotFound if missing
 
-2. Validate doctor is active
+2. SELECT * FROM doctors WHERE doctor_id = ? AND hospital_id = ? AND is_active = true
    → raise DoctorNotFound if missing or inactive
 
-3. Check no SCHEDULED appointment for (patient_id, doctor_id, date)
-   → raise DuplicateBooking if exists
+3. BEGIN TRANSACTION
+     a. SELECT * FROM slots WHERE slot_id = ? FOR UPDATE   ← row lock
+        → raise SlotNotFound if missing
+        → raise SlotUnavailable if status != 'AVAILABLE'
 
-4. InternalStore.get_slot(slot_id)
-   → raise SlotNotFound if missing
-   → raise SlotUnavailable if status != AVAILABLE
+     b. Check no SCHEDULED appointment for (patient_id, doctor_id, date):
+        SELECT COUNT(*) FROM appointments
+        WHERE patient_id = ? AND doctor_id = ? AND date = ?
+          AND status = 'SCHEDULED'
+        → raise DuplicateBooking if count > 0
+        (DB partial unique index is the safety net; this check is a fast-fail)
 
-5. slot.status = BOOKED
-   Create Appointment(status = SCHEDULED, booked_at = now)
-   InternalStore.save_slot(slot)
-   InternalStore.save_appointment(appointment)
+     c. UPDATE slots SET status = 'BOOKED' WHERE slot_id = ?
+     d. INSERT INTO appointments(status = 'SCHEDULED', booked_at = now)
+4. COMMIT
 
-6. Return appointment_id, slot.start_time
+5. Return appointment_id, slot.start_time
 ```
 
 ### 4.6 SLOT — Cancel
@@ -239,7 +245,7 @@ Input:  hospital_id, doctor_id, patient_id, slot_id
 ```
 Input:  appointment_id, patient_id
 
-1. InternalStore.get_appointment(appointment_id)
+1. SELECT * FROM appointments WHERE appointment_id = ?
    → raise AppointmentNotFound if missing
 
 2. Validate appointment.patient_id == patient_id
@@ -248,11 +254,11 @@ Input:  appointment_id, patient_id
 3. Validate appointment.status == SCHEDULED
    → raise AppointmentNotCancellable if already CANCELLED
 
-4. appointment.status = CANCELLED
-   appointment.cancelled_at = now
-   slot.status = AVAILABLE
-   InternalStore.save_appointment(appointment)
-   InternalStore.save_slot(slot)
+4. BEGIN TRANSACTION
+     UPDATE appointments SET status = 'CANCELLED', cancelled_at = now
+       WHERE appointment_id = ?
+     UPDATE slots SET status = 'AVAILABLE' WHERE slot_id = appointment.slot_id
+   COMMIT
 
 5. Return confirmation
 ```
@@ -263,16 +269,18 @@ Input:  appointment_id, patient_id
 
 ```
 Doctor opens day:
-  → Create DoctorSession(status = OPEN, started_at = now)
-  → Initialise session_counter[session_id] = 1
-  → InternalStore.save_session(session)
+  → INSERT INTO doctor_sessions(status = 'OPEN', started_at = now)
+  → CREATE SEQUENCE token_seq_{session_id} START 1 INCREMENT 1
 
 Doctor closes day:
-  → session.status = CLOSED, ended_at = now
-  → All WAITING tokens for this session → CANCELLED
-  → SERVING token completes naturally (not force-cancelled)
-  → session_counter[session_id] removed
-  → InternalStore.save_session(session)
+  → BEGIN TRANSACTION
+      UPDATE doctor_sessions SET status = 'CLOSED', ended_at = now
+        WHERE session_id = ?
+      UPDATE tokens SET status = 'CANCELLED'
+        WHERE session_id = ? AND status = 'WAITING'
+        -- SERVING token completes naturally; not force-cancelled
+    COMMIT
+  → DROP SEQUENCE token_seq_{session_id}
 ```
 
 ---
@@ -305,11 +313,50 @@ Doctor closes day:
 
 ---
 
-## 7. Design Patterns
+## 7. Concurrency
+
+### Token numbering — DB sequence
+```sql
+-- Created when doctor opens the day
+CREATE SEQUENCE token_seq_{session_id} START 1 INCREMENT 1;
+
+-- Used on every token insert (atomic, no duplicates)
+INSERT INTO tokens (..., token_number)
+VALUES (..., nextval('token_seq_{session_id}'));
+
+-- Dropped when doctor closes the day
+DROP SEQUENCE token_seq_{session_id};
+```
+
+### Slot booking — row-level lock
+```sql
+BEGIN;
+  SELECT * FROM slots WHERE slot_id = ? FOR UPDATE;
+  -- concurrent bookings queue behind this lock (<10ms, no external calls inside txn)
+  UPDATE slots SET status = 'BOOKED' WHERE slot_id = ?;
+  INSERT INTO appointments (...);
+COMMIT;
+```
+
+### Slot cancel — atomic transaction
+```sql
+BEGIN;
+  UPDATE appointments SET status = 'CANCELLED', cancelled_at = now WHERE appointment_id = ?;
+  UPDATE slots SET status = 'AVAILABLE' WHERE slot_id = ?;
+COMMIT;
+-- If either update fails, both roll back — slot never freed without appointment cancelled
+```
+
+---
+
+## 8. Design Patterns
 
 | Pattern | Application |
 |---|---|
 | Strategy | `BookingStrategy` interface — `TokenStrategy` and `SlotStrategy` swap in based on `HospitalConfig.booking_mode` |
-| In-memory store | All state in `InternalStore`; no DB or persistence layer |
-| FIFO ordering | Token queue is pure sequential — token_number determines order |
+| Repository | All DB access goes through `Repository`; no raw SQL in strategy or engine classes |
+| DB sequence | Per-session `token_seq_{session_id}` guarantees atomic, gap-free token numbering |
+| Pessimistic lock | `SELECT FOR UPDATE` on slot prevents double-booking under concurrent requests |
+| Atomic transaction | Slot cancel wraps appointment + slot updates in one transaction |
+| FIFO ordering | Token queue is pure sequential — `token_number` determines order |
 | Fail-fast validation | Patient, doctor, and slot checks run before any state mutation |
