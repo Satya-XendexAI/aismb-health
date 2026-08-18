@@ -27,8 +27,6 @@ All state is persisted in a SQL database via a `Repository` layer. Strategies in
 │                                                          │
 │  + book(request) → Token | Appointment                   │
 │  + cancel(booking_id, patient_id) → confirmation         │
-│  + view_slots(hospital_id, doctor_id, date) → List[Slot] │
-│  + get_queue_position(token_id) → int                    │
 │                                                          │
 │  [ selects strategy from HospitalConfig at construction ]│
 └────────────────────┬─────────────────────────────────────┘
@@ -40,7 +38,6 @@ All state is persisted in a SQL database via a `Repository` layer. Strategies in
    │             │      │               │
    │ + book()    │      │ + book()      │
    │ + cancel()  │      │ + cancel()    │
-   │ + position()│      │ + view()      │
    └──────┬──────┘      └───────┬───────┘
           └──────────┬──────────┘
                      ▼
@@ -153,10 +150,7 @@ Input:  hospital_id, doctor_id, patient_id
 
 4. INSERT tokens(token_number, status = WAITING, issued_at = now)
 
-5. Return token_number,
-          queue_position = SELECT COUNT(*) FROM tokens
-                           WHERE session_id = ? AND status = 'WAITING'
-                             AND token_number < token_number
+5. Return token_number
 ```
 
 ### 4.2 TOKEN — Cancel
@@ -178,39 +172,7 @@ Input:  token_id, patient_id
 5. Return confirmation
 ```
 
-### 4.3 TOKEN — Get Queue Position
-
-```
-Input:  token_id
-
-1. SELECT * FROM tokens WHERE token_id = ?
-   → raise TokenNotFound if missing
-
-2. Validate token.status == WAITING
-   → raise TokenNotActive if not WAITING
-
-3. position = SELECT COUNT(*) FROM tokens
-              WHERE session_id = token.session_id
-                AND status = 'WAITING'
-                AND token_number < token.token_number
-
-4. Return position   (0 = next to be served)
-```
-
-### 4.4 SLOT — View Available Slots
-
-```
-Input:  hospital_id, doctor_id, date
-
-1. SELECT * FROM doctors WHERE doctor_id = ? AND hospital_id = ?
-   → raise DoctorNotFound if missing
-
-2. SELECT * FROM slots
-   WHERE doctor_id = ? AND date = ? AND status = 'AVAILABLE'
-   ORDER BY start_time ASC
-```
-
-### 4.5 SLOT — Book
+### 4.3 SLOT — Book
 
 ```
 Input:  hospital_id, doctor_id, patient_id, slot_id
@@ -240,7 +202,7 @@ Input:  hospital_id, doctor_id, patient_id, slot_id
 5. Return appointment_id, slot.start_time
 ```
 
-### 4.6 SLOT — Cancel
+### 4.4 SLOT — Cancel
 
 ```
 Input:  appointment_id, patient_id
@@ -265,27 +227,7 @@ Input:  appointment_id, patient_id
 
 ---
 
-## 5. Session Lifecycle (TOKEN mode)
-
-```
-Doctor opens day:
-  → INSERT INTO doctor_sessions(status = 'OPEN', started_at = now)
-  → CREATE SEQUENCE token_seq_{session_id} START 1 INCREMENT 1
-
-Doctor closes day:
-  → BEGIN TRANSACTION
-      UPDATE doctor_sessions SET status = 'CLOSED', ended_at = now
-        WHERE session_id = ?
-      UPDATE tokens SET status = 'CANCELLED'
-        WHERE session_id = ? AND status = 'WAITING'
-        -- SERVING token completes naturally; not force-cancelled
-    COMMIT
-  → DROP SEQUENCE token_seq_{session_id}
-```
-
----
-
-## 6. Error Cases
+## 5. Error Cases
 
 ### TOKEN mode
 
@@ -293,7 +235,7 @@ Doctor closes day:
 |---|---|---|
 | Patient not in store | `PATIENT_NOT_FOUND` | Reject booking |
 | No OPEN doctor session today | `NO_ACTIVE_SESSION` | Reject booking |
-| Token not found | `TOKEN_NOT_FOUND` | Reject cancel / position check |
+| Token not found | `TOKEN_NOT_FOUND` | Reject cancel |
 | Patient ID mismatch on token | `UNAUTHORISED` | Reject cancel |
 | Token status is SERVING / COMPLETED | `TOKEN_NOT_CANCELLABLE` | Reject cancel |
 | Doctor closes session mid-queue | `SESSION_CLOSED` | All WAITING tokens → CANCELLED |
@@ -303,7 +245,7 @@ Doctor closes day:
 | Scenario | Error Code | Behaviour |
 |---|---|---|
 | Patient not in store | `PATIENT_NOT_FOUND` | Reject booking |
-| Doctor not found or inactive | `DOCTOR_NOT_FOUND` | Reject booking / view |
+| Doctor not found or inactive | `DOCTOR_NOT_FOUND` | Reject booking |
 | Slot not found | `SLOT_NOT_FOUND` | Reject booking |
 | Slot already BOOKED or BLOCKED | `SLOT_UNAVAILABLE` | Reject booking |
 | Duplicate booking (same doctor + date) | `DUPLICATE_BOOKING` | Reject — one appointment per patient per doctor per day |
@@ -313,7 +255,7 @@ Doctor closes day:
 
 ---
 
-## 7. Concurrency
+## 6. Concurrency
 
 ### Token numbering — DB sequence
 ```sql
@@ -349,7 +291,7 @@ COMMIT;
 
 ---
 
-## 8. Design Patterns
+## 7. Design Patterns
 
 | Pattern | Application |
 |---|---|
