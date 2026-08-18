@@ -1,6 +1,6 @@
 # Prescription Medication Reminder Service — Design Spec
 
-**Date:** 2026-08-17 (revised 2026-08-18)
+**Date:** 2026-08-17 (revised 2026-08-18 ×2)
 **Scope:** Backend LLD only — no UI/channel integration
 **Status:** Approved
 
@@ -8,9 +8,9 @@
 
 ## 1. Overview
 
-The Prescription Medication Reminder Service fires dose reminders for active medications. Medication data is managed directly in the DB from the backend — no EMR adapter or registration flow. The service exposes a single `evaluate(now)` method that groups all due doses by patient and sends one WhatsApp reminder per patient per dose time, listing all their due medications together.
+The Prescription Medication Reminder Service is triggered manually (e.g., by a staff member or admin action). When triggered, it finds all patients with active medications today who have not yet received a reminder today, groups their medications into one WhatsApp message per patient, and sends it.
 
-Sent reminders are recorded in a SQL DB table for idempotency.
+Medication data is managed directly in the DB from the backend. State is persisted in SQL via a `Repository` layer.
 
 ---
 
@@ -18,9 +18,9 @@ Sent reminders are recorded in a SQL DB table for idempotency.
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│            MedicationReminderService                     │
+│           MedicationReminderService                      │
 │                                                         │
-│  + evaluate(now: datetime) → None          ← tick       │
+│  + send_reminders() → ReminderSummary   ← manual call   │
 │                                                         │
 │  [ notifier injected at construction ]                  │
 └──────────────┬──────────────────────────────────────────┘
@@ -34,7 +34,7 @@ Sent reminders are recorded in a SQL DB table for idempotency.
 
 **Components:**
 
-- `ReminderNotifier` — sends reminder messages to patients via WhatsApp. `InMemoryReminderNotifier` with `should_fail` flag for tests.
+- `ReminderNotifier` — sends WhatsApp messages. `InMemoryReminderNotifier` with `should_fail` flag for tests.
 - `Repository` — reads `medications` and writes `reminder_records` to SQL DB.
 
 `MedicationReminderService` holds no mutable state itself.
@@ -49,56 +49,63 @@ Sent reminders are recorded in a SQL DB table for idempotency.
 medications                              -- populated and managed by backend
   medication_id     UUID        PK
   patient_id        UUID
+  hospital_id       UUID
   drug_name         str               e.g. "Metformin 500mg"
-  dose_description  str               e.g. "1 tablet"
-  dose_times        List[time]        e.g. [08:00, 21:00]
+  dose_description  str               e.g. "1 tablet twice daily"
   start_date        date
   end_date          date
 
-reminder_records                         -- written by the service; one per patient per dose slot
+reminder_records                         -- written by the service; one per patient per day
   reminder_id       UUID        PK
   patient_id        UUID
-  due_at            datetime    the dose slot (date + dose_time) this reminder covers
+  reminder_date     date              the calendar date this reminder covers
+  triggered_at      datetime          when send_reminders() was called
   status            Enum        SENT | FAILED
   fired_at          datetime
 ```
 
-**Idempotency key:** `(patient_id, due_at)` — one reminder per patient per dose slot. `evaluate()` skips a slot if a row already exists for that patient.
+**Idempotency key:** `(patient_id, reminder_date)` — one reminder per patient per day. SENT records are skipped on subsequent triggers. FAILED records are retried on the next trigger.
 
 ---
 
 ## 4. Core Flow
 
-### 4.1 evaluate(now: datetime)
+### 4.1 send_reminders() → ReminderSummary
 
 ```
-1. Fetch active medications:
-   SELECT * FROM medications
-   WHERE start_date <= now.date() AND end_date >= now.date()
+today = current date
 
-2. Collect due dose slots:
-   For each medication, for each dose_time:
-     due_at = datetime.combine(now.date(), dose_time)
-     if due_at <= now: include (patient_id, due_at, medication)
+1. Find patients with active medications and no reminder sent today:
+   SELECT DISTINCT patient_id FROM medications
+   WHERE start_date <= today AND end_date >= today
+     AND patient_id NOT IN (
+       SELECT patient_id FROM reminder_records
+       WHERE reminder_date = today AND status = 'SENT'
+     )
 
-3. Group by (patient_id, due_at)
+2. For each patient_id:
 
-4. For each (patient_id, due_at) group:
-
-     a. Check no existing reminder_records row for (patient_id, due_at)
-        → skip if already sent (idempotency)
+     a. Fetch their active medications:
+        SELECT * FROM medications
+        WHERE patient_id = ? AND start_date <= today AND end_date >= today
 
      b. status = 'SENT'
         try:
           ReminderNotifier.send_reminder(
             patient_id  = patient_id,
-            due_at      = due_at,
-            medications = [{ drug_name, dose_description } for each med in group]
+            medications = [{ drug_name, dose_description } for each medication]
           )
         except Exception:
           status = 'FAILED'
 
-     c. INSERT INTO reminder_records(patient_id, due_at, status, fired_at = now)
+     c. INSERT INTO reminder_records(patient_id, reminder_date = today,
+                                     triggered_at = now, status, fired_at = now)
+
+3. Return ReminderSummary(
+     total_patients = count of patients processed,
+     sent           = count where status = SENT,
+     failed         = count where status = FAILED
+   )
 ```
 
 ---
@@ -107,7 +114,7 @@ reminder_records                         -- written by the service; one per pati
 
 | Scenario | Error Code | Behaviour |
 |---|---|---|
-| `ReminderNotifier.send_reminder` raises | _(no raise)_ | `reminder_records.status = FAILED`; `evaluate()` continues to next dose |
+| `ReminderNotifier.send_reminder` raises | _(no raise)_ | `reminder_records.status = FAILED`; continues to next patient; retried on next trigger |
 
 ---
 
@@ -115,7 +122,7 @@ reminder_records                         -- written by the service; one per pati
 
 | Pattern | Application |
 |---|---|
-| DB-managed data | Medications created and managed by backend; service reads them directly — no adapter or registration flow |
-| Evaluate-on-tick | `evaluate(now)` called externally; time injected for deterministic tests |
-| Idempotency | `(patient_id, due_at)` existence check prevents double-send on repeated ticks |
-| Fire-and-forget | Reminders best-effort; FAILED rows logged but not retried |
+| DB-managed data | Medications created and managed by backend; service reads them directly |
+| Manual trigger | `send_reminders()` called on demand — no scheduler or tick needed |
+| Idempotency | `(patient_id, reminder_date)` prevents double-send on same day; FAILED records retried |
+| Fire-and-forget | Reminders best-effort; FAILED rows logged and retried on next call |
