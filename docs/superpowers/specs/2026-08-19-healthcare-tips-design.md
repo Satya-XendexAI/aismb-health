@@ -8,7 +8,7 @@
 
 ## 1. Overview
 
-The Healthcare Tips & Wellness Service sends educational health tips to patients via WhatsApp. Tips are loaded into memory at construction time by fetching a JSONL dataset from a URL. When triggered manually, the service picks a random tip for each patient and sends the `completion` text as the WhatsApp message body.
+The Healthcare Tips & Wellness Service sends educational health tips to patients via WhatsApp. Tips are loaded into memory at construction time by reading a local JSONL file. When triggered manually, the service picks a random tip for each patient and sends the `completion` text as the WhatsApp message body.
 
 No DB table is used for tips — they live entirely in memory. Only patient and delivery records touch the DB.
 
@@ -22,8 +22,8 @@ No DB table is used for tips — they live entirely in memory. Only patient and 
 │                                                         │
 │  + send_tips() → TipsSummary        ← manual call       │
 │                                                         │
-│  [ dataset_url + notifier injected at construction;     │
-│    tips loaded from JSONL into memory on init ]         │
+│  [ dataset_path + notifier injected at construction;    │
+│    tips loaded from local JSONL file into memory on init]│
 └──────────────┬──────────────────────────────────────────┘
                │ uses
          ┌─────┴──────────────┐
@@ -37,7 +37,7 @@ No DB table is used for tips — they live entirely in memory. Only patient and 
 
 - `TipsNotifier` — sends WhatsApp messages. `InMemoryTipsNotifier` with `should_fail` flag for tests.
 - `Repository` — reads `patients`, writes `tip_records` to SQL DB.
-- **In-memory tips list** — loaded once at construction by fetching `dataset_url` and parsing each JSONL line into `{ prompt, completion }`. Raises at construction if the fetch fails or the list is empty.
+- **In-memory tips list** — loaded once at construction by reading `dataset_path` (local file) and parsing each JSONL line into `{ prompt, completion }`. Raises at construction if the file is not found or the list is empty.
 
 `HealthcareTipsService` holds the in-memory tips list as read-only state set at construction. No mutable state.
 
@@ -48,12 +48,12 @@ No DB table is used for tips — they live entirely in memory. Only patient and 
 ### 3.1 In-Memory (loaded at construction)
 
 ```
-Tip                                      -- parsed from JSONL dataset
+Tip                                      -- parsed from local JSONL file
   prompt      str                        the original healthcare question (not sent)
   completion  str                        the tip text → sent as WhatsApp message body
 ```
 
-Dataset source: `https://huggingface.co/datasets/adrianf12/healthcare-qa-dataset-jsonl/resolve/main/healthcare_qa_dataset.jsonl`
+Local file: `data/healthcare_qa_dataset.jsonl` (downloaded from HuggingFace and stored with the project).
 
 Each line is a JSON object `{ "prompt": "...", "completion": "..." }`.
 
@@ -82,10 +82,10 @@ tip_records                              -- written by the service; one per pati
 ### 4.1 Construction
 
 ```
-__init__(dataset_url, notifier, repository):
+__init__(dataset_path, notifier, repository):
 
-1. GET dataset_url → stream JSONL response
-   → raise DatasetLoadError if HTTP error
+1. open(dataset_path)
+   → raise DatasetLoadError if file not found
 
 2. For each line:
      tip = json.parse(line)   → { prompt, completion }
@@ -132,8 +132,8 @@ __init__(dataset_url, notifier, repository):
 
 | Scenario | Error Code | Behaviour |
 |---|---|---|
-| Dataset URL unreachable or HTTP error | `DatasetLoadError` | Raised at construction — service cannot be created |
-| Dataset is empty (zero lines) | `DatasetLoadError` | Raised at construction |
+| Local file not found at `dataset_path` | `DatasetLoadError` | Raised at construction — service cannot be created |
+| File is empty (zero lines) | `DatasetLoadError` | Raised at construction |
 | `TipsNotifier.send_tip` raises | _(no raise)_ | `tip_records.status = FAILED`; continues to next patient |
 
 ---
@@ -142,7 +142,7 @@ __init__(dataset_url, notifier, repository):
 
 | Pattern | Application |
 |---|---|
-| In-memory dataset | Tips fetched from JSONL URL at construction; no DB table needed |
+| In-memory dataset | Tips read from local JSONL file at construction; no DB table needed |
 | Manual trigger | `send_tips()` called on demand — no scheduler or tick needed |
 | Fail-fast construction | Service raises at init if dataset cannot be loaded — no silent empty-tip state |
 | Random selection | `random.choice(self.tips)` per patient — simple, stateless |
