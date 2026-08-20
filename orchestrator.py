@@ -1,10 +1,14 @@
 import uuid
 import json
 import logging
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, List
-import anthropic
+from dotenv import load_dotenv
+from openai import OpenAI
+
+load_dotenv()  # reads .env from current directory
 
 logger = logging.getLogger(__name__)
 
@@ -80,42 +84,51 @@ class OrchestratorContext:
 
 TOOL_SCHEMAS = [
     {
-        "name": "appointment",
-        "description": "Book or cancel a doctor appointment for the patient.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "action":      {"type": "string", "enum": ["book", "cancel"]},
-                "doctor_name": {"type": "string", "description": "Name of the doctor"},
-                "date":        {"type": "string", "description": "Date e.g. 2026-08-20"},
-            },
-            "required": ["action"],
-        },
-    },
-    {
-        "name": "kg_retriever",
-        "description": "Answer questions about doctors, departments, timings, and hospital procedures.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "The patient's question"},
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "query_data",
-        "description": "Fetch the patient's own records: appointments, test results, prescriptions, or medications.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query_type": {
-                    "type": "string",
-                    "enum": ["appointments", "test_results", "prescriptions", "medications"],
+        "type": "function",
+        "function": {
+            "name": "appointment",
+            "description": "Book or cancel a doctor appointment for the patient.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action":      {"type": "string", "enum": ["book", "cancel"]},
+                    "doctor_name": {"type": "string", "description": "Name of the doctor"},
+                    "date":        {"type": "string", "description": "Date e.g. 2026-08-20"},
                 },
-                "filters": {"type": "object"},
+                "required": ["action"],
             },
-            "required": ["query_type"],
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "kg_retriever",
+            "description": "Answer questions about doctors, departments, timings, and hospital procedures.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The patient's question"},
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "query_data",
+            "description": "Fetch the patient's own records: appointments, test results, prescriptions, or medications.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query_type": {
+                        "type": "string",
+                        "enum": ["appointments", "test_results", "prescriptions", "medications"],
+                    },
+                    "filters": {"type": "object"},
+                },
+                "required": ["query_type"],
+            },
         },
     },
 ]
@@ -147,38 +160,45 @@ class InMemoryRepository:
     def get_patient_id_by_phone(self, from_number: str, hospital_id: str) -> Optional[str]:
         return self._patients.get(from_number)
 
-# ── Claude LLM Adapter ─────────────────────────────────────────────────────────
+# ── NVIDIA LLM Adapter (OpenAI-compatible) ─────────────────────────────────────
 
-class ClaudeLLMAdapter:
-    def __init__(self, model: str = "claude-haiku-4-5-20251001"):
-        self.client = anthropic.Anthropic()
+class NvidiaLLMAdapter:
+    def __init__(
+        self,
+        model:    str = os.getenv("NVIDIA_MODEL", "meta/llama-3.1-70b-instruct"),
+        base_url: str = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
+        api_key:  str = os.getenv("NVIDIA_API_KEY", ""),
+    ):
         self.model  = model
+        self.client = OpenAI(base_url=base_url, api_key=api_key)
 
     def run_agent(self, history: List[ChatTurn], tool_schemas: list) -> AgentResponse:
-        messages = self._build_messages(history)
-        response = self.client.messages.create(
+        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + self._build_messages(history)
+
+        response = self.client.chat.completions.create(
             model=self.model,
-            max_tokens=1024,
-            system=SYSTEM_PROMPT,
-            tools=tool_schemas,
             messages=messages,
+            tools=tool_schemas,
+            tool_choice="auto",
+            max_tokens=1024,
         )
 
-        if response.stop_reason == "tool_use":
-            block = next(b for b in response.content if b.type == "tool_use")
+        choice = response.choices[0]
+
+        if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
+            tc = choice.message.tool_calls[0]
             return AgentResponse(
                 type=AgentResponseType.TOOL_CALL,
                 tool_call=ToolCall(
-                    tool_name=block.name,
-                    args=block.input,
-                    tool_use_id=block.id,
+                    tool_name=tc.function.name,
+                    args=json.loads(tc.function.arguments),
+                    tool_use_id=tc.id,
                 ),
             )
 
-        text_block = next((b for b in response.content if b.type == "text"), None)
         return AgentResponse(
             type=AgentResponseType.TEXT,
-            text=text_block.text if text_block else "",
+            text=choice.message.content or "",
         )
 
     def _build_messages(self, history: List[ChatTurn]) -> list:
@@ -187,23 +207,22 @@ class ClaudeLLMAdapter:
             if turn.role == ChatRole.USER:
                 # Merge consecutive user messages (safety guard)
                 if messages and messages[-1]["role"] == "user":
-                    prev = messages[-1]["content"]
-                    if isinstance(prev, str):
-                        messages[-1]["content"] = prev + "\n" + turn.content
-                    else:
-                        messages[-1]["content"].append({"type": "text", "text": turn.content})
+                    messages[-1]["content"] += "\n" + turn.content
                 else:
                     messages.append({"role": "user", "content": turn.content})
 
             elif turn.role == ChatRole.ASSISTANT:
                 if turn.tool_call:
                     messages.append({
-                        "role": "assistant",
-                        "content": [{
-                            "type":  "tool_use",
-                            "id":    turn.tool_call.tool_use_id,
-                            "name":  turn.tool_call.tool_name,
-                            "input": turn.tool_call.args,
+                        "role":       "assistant",
+                        "content":    None,
+                        "tool_calls": [{
+                            "id":       turn.tool_call.tool_use_id,
+                            "type":     "function",
+                            "function": {
+                                "name":      turn.tool_call.tool_name,
+                                "arguments": json.dumps(turn.tool_call.args),
+                            },
                         }],
                     })
                 else:
@@ -217,16 +236,11 @@ class ClaudeLLMAdapter:
                         tool_use_id = prev_turn.tool_call.tool_use_id
                         break
 
-                block = {
-                    "type":        "tool_result",
-                    "tool_use_id": tool_use_id,
-                    "content":     turn.content,
-                }
-                # tool_result must be user-role; merge if previous is already a user list
-                if messages and messages[-1]["role"] == "user" and isinstance(messages[-1]["content"], list):
-                    messages[-1]["content"].append(block)
-                else:
-                    messages.append({"role": "user", "content": [block]})
+                messages.append({
+                    "role":         "tool",
+                    "tool_call_id": tool_use_id,
+                    "content":      turn.content,
+                })
 
         return messages
 

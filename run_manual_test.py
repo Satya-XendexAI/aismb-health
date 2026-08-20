@@ -21,7 +21,7 @@ import logging
 from orchestrator import (
     WhatsAppOrchestrator,
     WAMessage,
-    ClaudeLLMAdapter,
+    NvidiaLLMAdapter,
     PrintWANotifier,
     InMemoryRepository,
 )
@@ -68,7 +68,7 @@ def main():
     repository = InMemoryRepository(known_patients=KNOWN_PATIENTS)
 
     orc = WhatsAppOrchestrator(
-        llm=ClaudeLLMAdapter(),
+        llm=NvidiaLLMAdapter(),
         notifier=PrintWANotifier(),
         repository=repository,
         fallback_text="I'm sorry, I couldn't process that. Please try again.",
