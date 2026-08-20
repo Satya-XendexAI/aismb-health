@@ -180,7 +180,10 @@ class NvidiaLLMAdapter:
             messages=messages,
             tools=tool_schemas,
             tool_choice="auto",
-            max_tokens=1024,
+            temperature=1,
+            top_p=1,
+            max_tokens=4096,
+            stream=False,
         )
 
         choice = response.choices[0]
