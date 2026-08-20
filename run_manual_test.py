@@ -1,0 +1,130 @@
+"""
+WhatsApp Orchestrator — Manual CLI Test
+----------------------------------------
+Simulates a WhatsApp conversation in your terminal.
+Bot responses print immediately; session state persists across turns.
+
+Usage:
+    pip install anthropic
+    export ANTHROPIC_API_KEY=sk-ant-...
+    python run_manual_test.py
+
+Commands during chat:
+    switch   — change the active phone number (known vs unknown patient)
+    status   — print current session state
+    reset    — clear session history for current number
+    quit     — exit
+"""
+
+import uuid
+import logging
+from orchestrator import (
+    WhatsAppOrchestrator,
+    WAMessage,
+    ClaudeLLMAdapter,
+    PrintWANotifier,
+    InMemoryRepository,
+)
+
+# ── Config ─────────────────────────────────────────────────────────────────────
+
+HOSPITAL_ID = str(uuid.uuid4())
+
+# Patients registered in the system
+KNOWN_PATIENTS = {
+    "+91-known": "patient-abc-123",
+}
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+def print_banner():
+    print()
+    print("=" * 55)
+    print("  WhatsApp Orchestrator  —  Manual Test CLI")
+    print("=" * 55)
+    print("  Known patient   : +91-known  (can book appointments)")
+    print("  Unknown patient : any other number")
+    print()
+    print("  Commands: switch | status | reset | quit")
+    print("=" * 55)
+    print()
+
+def print_status(from_number: str, repository: InMemoryRepository):
+    session = repository.get_session(HOSPITAL_ID, from_number)
+    if session is None:
+        print(f"\n  [STATUS] No session yet for {from_number}\n")
+        return
+    print(f"\n  [STATUS] number={from_number}")
+    print(f"           patient_id={session.patient_id}")
+    print(f"           state={session.state.value}")
+    print(f"           history_turns={len(session.history)}")
+    print(f"           pending_tool={session.pending_tool}\n")
+
+# ── Main ───────────────────────────────────────────────────────────────────────
+
+def main():
+    logging.basicConfig(level=logging.WARNING)
+
+    repository = InMemoryRepository(known_patients=KNOWN_PATIENTS)
+
+    orc = WhatsAppOrchestrator(
+        llm=ClaudeLLMAdapter(),
+        notifier=PrintWANotifier(),
+        repository=repository,
+        fallback_text="I'm sorry, I couldn't process that. Please try again.",
+        max_iterations=5,
+        max_history_turns=10,
+    )
+
+    print_banner()
+
+    raw = input("  Enter your WhatsApp number (Enter for +91-known): ").strip()
+    from_number = raw if raw else "+91-known"
+    print(f"\n  Using: {from_number}  (known={from_number in KNOWN_PATIENTS})\n")
+    print("-" * 55)
+
+    while True:
+        try:
+            text = input("You: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\n\nGoodbye!")
+            break
+
+        if not text:
+            continue
+
+        if text.lower() == "quit":
+            print("Goodbye!")
+            break
+
+        if text.lower() == "switch":
+            raw = input("  New number (Enter for +91-known): ").strip()
+            from_number = raw if raw else "+91-known"
+            print(f"  Switched to: {from_number}  (known={from_number in KNOWN_PATIENTS})\n")
+            continue
+
+        if text.lower() == "status":
+            print_status(from_number, repository)
+            continue
+
+        if text.lower() == "reset":
+            session = repository.get_session(HOSPITAL_ID, from_number)
+            if session:
+                session.history      = []
+                session.pending_tool = None
+                from orchestrator import SessionState
+                session.state = SessionState.IDLE
+                repository.save_session(session)
+            print("  [RESET] Session cleared.\n")
+            continue
+
+        orc.handle_message(WAMessage(
+            from_number=from_number,
+            message_id=str(uuid.uuid4()),
+            text=text,
+            hospital_id=HOSPITAL_ID,
+        ))
+
+
+if __name__ == "__main__":
+    main()
