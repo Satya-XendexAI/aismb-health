@@ -19,6 +19,10 @@ class SessionState(Enum):
     AWAITING_CONFIRM = "AWAITING_CONFIRM"
     AWAITING_AUTH    = "AWAITING_AUTH"
 
+class Role(Enum):
+    PATIENT = "patient"
+    DOCTOR  = "doctor"
+
 class ChatRole(Enum):
     USER        = "user"
     ASSISTANT   = "assistant"
@@ -32,6 +36,7 @@ class GateStatus(Enum):
     OK               = "OK"
     AUTH_REQUIRED    = "AUTH_REQUIRED"
     CONFIRM_REQUIRED = "CONFIRM_REQUIRED"
+    FORBIDDEN        = "FORBIDDEN"
 
 # ── Data Models ────────────────────────────────────────────────────────────────
 
@@ -64,6 +69,7 @@ class Session:
     state:        SessionState
     history:      List[ChatTurn]
     pending_tool: Optional[ToolCall]
+    role:         Role = Role.PATIENT
 
 @dataclass
 class AgentResponse:
@@ -83,56 +89,65 @@ class OrchestratorContext:
 
 # ── Tool Schemas ───────────────────────────────────────────────────────────────
 
-TOOL_SCHEMAS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "appointment",
-            "description": "Book or cancel a doctor appointment for the patient.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "action":      {"type": "string", "enum": ["book", "cancel"]},
-                    "doctor_name": {"type": "string", "description": "Name of the doctor"},
-                    "date":        {"type": "string", "description": "Date e.g. 2026-08-20"},
-                },
-                "required": ["action"],
+_appointment_schema = {
+    "type": "function",
+    "function": {
+        "name": "appointment",
+        "description": "Book or cancel a doctor appointment for the patient.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action":      {"type": "string", "enum": ["book", "cancel"]},
+                "doctor_name": {"type": "string", "description": "Name of the doctor"},
+                "date":        {"type": "string", "description": "Date e.g. 2026-08-20"},
             },
+            "required": ["action"],
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "kg_retriever",
-            "description": "Find doctors by symptoms, specialization, name, language, or experience. Use for any query about finding or getting info on doctors.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "The patient's query in their own words"},
-                },
-                "required": ["query"],
+}
+
+_kg_retriever_schema = {
+    "type": "function",
+    "function": {
+        "name": "kg_retriever",
+        "description": "Find doctors by symptoms, specialization, name, language, or experience. Use for any query about finding or getting info on doctors.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "The user's query in their own words"},
             },
+            "required": ["query"],
         },
     },
-    {
-        "type": "function",
-        "function": {
-            "name": "query_data",
-            "description": "Fetch the patient's own records: appointments, test results, prescriptions, or medications.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query_type": {
-                        "type": "string",
-                        "enum": ["appointments", "test_results", "prescriptions", "medications"],
-                    },
-                    "filters": {"type": "object"},
+}
+
+_query_data_schema = {
+    "type": "function",
+    "function": {
+        "name": "query_data",
+        "description": "Query hospital database: fetch appointments, test results, prescriptions, or medications.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "query_type": {
+                    "type": "string",
+                    "enum": ["appointments", "test_results", "prescriptions", "medications"],
                 },
-                "required": ["query_type"],
+                "filters": {"type": "object"},
             },
+            "required": ["query_type"],
         },
     },
-]
+}
+
+PATIENT_TOOLS = [_appointment_schema, _kg_retriever_schema]
+DOCTOR_TOOLS  = [_kg_retriever_schema, _query_data_schema]
+
+ROLE_PERMISSIONS = {
+    "appointment":  {Role.PATIENT},
+    "query_data":   {Role.DOCTOR},
+    "kg_retriever": {Role.PATIENT, Role.DOCTOR},
+}
 
 SYSTEM_PROMPT = (
     "You are a helpful hospital WhatsApp assistant. Help patients with:\n"
@@ -146,11 +161,12 @@ SYSTEM_PROMPT = (
 # ── In-Memory Repository ───────────────────────────────────────────────────────
 
 class InMemoryRepository:
-    """Stores sessions in memory. known_patients maps from_number → patient_id."""
+    """Stores sessions in memory. doctors is a set of phone numbers with DOCTOR role."""
 
-    def __init__(self, known_patients: dict = None):
+    def __init__(self, known_patients: dict = None, doctors: set = None):
         self._sessions: dict = {}
         self._patients: dict = known_patients or {}
+        self._doctors:  set  = doctors or set()
 
     def get_session(self, hospital_id: str, from_number: str) -> Optional[Session]:
         return self._sessions.get(f"{hospital_id}:{from_number}")
@@ -160,6 +176,9 @@ class InMemoryRepository:
 
     def get_patient_id_by_phone(self, from_number: str, hospital_id: str) -> Optional[str]:
         return self._patients.get(from_number)
+
+    def get_role(self, from_number: str) -> Role:
+        return Role.DOCTOR if from_number in self._doctors else Role.PATIENT
 
 # ── Gemini LLM Adapter ────────────────────────────────────────────────────────
 
@@ -330,12 +349,13 @@ class WhatsAppOrchestrator:
 
         # ── Step 2: ReAct loop ─────────────────────────────────────────────────
 
-        final_text = self.fallback_text
+        tool_schemas = DOCTOR_TOOLS if session.role == Role.DOCTOR else PATIENT_TOOLS
+        final_text   = self.fallback_text
 
         for _ in range(self.max_iterations):
             print("  [Thinking...]", flush=True)
             try:
-                agent_response = self.llm.run_agent(session.history, TOOL_SCHEMAS)
+                agent_response = self.llm.run_agent(session.history, tool_schemas)
             except Exception as exc:
                 logger.error("LLM error: %s", exc)
                 print(f"  [LLM error: {exc}]")
@@ -353,6 +373,10 @@ class WhatsAppOrchestrator:
             ))
 
             gate_result = self._gate(agent_response.tool_call, context)
+
+            if gate_result.status == GateStatus.FORBIDDEN:
+                self._responder("Sorry, you don't have permission to perform this action.", context)
+                return
 
             if gate_result.status in (GateStatus.AUTH_REQUIRED, GateStatus.CONFIRM_REQUIRED):
                 self._interrupt(gate_result, agent_response.tool_call, context)
@@ -383,6 +407,7 @@ class WhatsAppOrchestrator:
                 state        = SessionState.IDLE,
                 history      = [],
                 pending_tool = None,
+                role         = self.repository.get_role(wa_message.from_number),
             )
 
         if session.patient_id is None:
@@ -396,6 +421,10 @@ class WhatsAppOrchestrator:
         return OrchestratorContext(wa_message, session, patient_id=session.patient_id)
 
     def _gate(self, tool_call: ToolCall, context: OrchestratorContext) -> GateResult:
+        allowed = ROLE_PERMISSIONS.get(tool_call.tool_name, {Role.PATIENT, Role.DOCTOR})
+        if context.session.role not in allowed:
+            return GateResult(GateStatus.FORBIDDEN)
+
         if tool_call.tool_name == "appointment":
             if context.patient_id is None:
                 return GateResult(GateStatus.AUTH_REQUIRED)

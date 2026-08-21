@@ -16,6 +16,7 @@ Commands during chat:
     quit     — exit
 """
 
+import json
 import uuid
 import logging
 from orchestrator import (
@@ -30,10 +31,12 @@ from orchestrator import (
 
 HOSPITAL_ID = str(uuid.uuid4())
 
-# Patients registered in the system
 KNOWN_PATIENTS = {
     "+91-known": "patient-abc-123",
 }
+
+with open("config/doctors.json") as f:
+    DOCTORS = set(json.load(f)["doctors"])
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -43,6 +46,7 @@ def print_banner():
     print("  WhatsApp Orchestrator  —  Manual Test CLI")
     print("=" * 55)
     print("  Known patient   : +91-known  (can book appointments)")
+    print("  Doctor          : +91-doctor (can query data)")
     print("  Unknown patient : any other number")
     print()
     print("  Commands: switch | status | reset | quit")
@@ -55,6 +59,7 @@ def print_status(from_number: str, repository: InMemoryRepository):
         print(f"\n  [STATUS] No session yet for {from_number}\n")
         return
     print(f"\n  [STATUS] number={from_number}")
+    print(f"           role={session.role.value}")
     print(f"           patient_id={session.patient_id}")
     print(f"           state={session.state.value}")
     print(f"           history_turns={len(session.history)}")
@@ -65,7 +70,7 @@ def print_status(from_number: str, repository: InMemoryRepository):
 def main():
     logging.basicConfig(level=logging.WARNING)
 
-    repository = InMemoryRepository(known_patients=KNOWN_PATIENTS)
+    repository = InMemoryRepository(known_patients=KNOWN_PATIENTS, doctors=DOCTORS)
 
     orc = WhatsAppOrchestrator(
         llm=GeminiLLMAdapter(),
