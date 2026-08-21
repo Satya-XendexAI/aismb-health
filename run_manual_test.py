@@ -29,11 +29,7 @@ from orchestrator import (
 
 # ── Config ─────────────────────────────────────────────────────────────────────
 
-HOSPITAL_ID = str(uuid.uuid4())
-
-KNOWN_PATIENTS = {
-    "+91-known": "patient-abc-123",
-}
+HOSPITAL_ID = "glngs-chn"   # must match hospital_id in the DB
 
 with open("config/doctors.json") as f:
     DOCTORS = set(json.load(f)["doctors"])
@@ -45,9 +41,8 @@ def print_banner():
     print("=" * 55)
     print("  WhatsApp Orchestrator  —  Manual Test CLI")
     print("=" * 55)
-    print("  Known patient   : +91-known  (can book appointments)")
-    print("  Doctor          : +91-doctor (can query data)")
-    print("  Unknown patient : any other number")
+    print("  Patient  : any number (appointments booked by phone)")
+    print("  Doctor   : numbers in config/doctors.json (query data only)")
     print()
     print("  Commands: switch | status | reset | quit")
     print("=" * 55)
@@ -70,7 +65,7 @@ def print_status(from_number: str, repository: InMemoryRepository):
 def main():
     logging.basicConfig(level=logging.WARNING)
 
-    repository = InMemoryRepository(known_patients=KNOWN_PATIENTS, doctors=DOCTORS)
+    repository = InMemoryRepository(doctors=DOCTORS)
 
     orc = WhatsAppOrchestrator(
         llm=GeminiLLMAdapter(),
@@ -83,9 +78,9 @@ def main():
 
     print_banner()
 
-    raw = input("  Enter your WhatsApp number (Enter for +91-known): ").strip()
-    from_number = raw if raw else "+91-known"
-    print(f"\n  Using: {from_number}  (known={from_number in KNOWN_PATIENTS})\n")
+    raw = input("  Enter your WhatsApp number: ").strip()
+    from_number = raw if raw else "+91-9999999999"
+    print(f"\n  Using: {from_number}  (doctor={from_number in DOCTORS})\n")
     print("-" * 55)
 
     while True:
@@ -104,8 +99,8 @@ def main():
 
         if text.lower() == "switch":
             raw = input("  New number (Enter for +91-known): ").strip()
-            from_number = raw if raw else "+91-known"
-            print(f"  Switched to: {from_number}  (known={from_number in KNOWN_PATIENTS})\n")
+            from_number = raw if raw else "+91-unknown"
+            print(f"  Switched to: {from_number}  (doctor={from_number in DOCTORS})\n")
             continue
 
         if text.lower() == "status":

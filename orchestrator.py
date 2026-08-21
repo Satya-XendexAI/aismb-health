@@ -23,7 +23,6 @@ logger = logging.getLogger(__name__)
 class SessionState(Enum):
     IDLE             = "IDLE"
     AWAITING_CONFIRM = "AWAITING_CONFIRM"
-    AWAITING_AUTH    = "AWAITING_AUTH"
 
 class Role(Enum):
     PATIENT = "patient"
@@ -40,7 +39,6 @@ class AgentResponseType(Enum):
 
 class GateStatus(Enum):
     OK               = "OK"
-    AUTH_REQUIRED    = "AUTH_REQUIRED"
     CONFIRM_REQUIRED = "CONFIRM_REQUIRED"
     FORBIDDEN        = "FORBIDDEN"
 
@@ -192,9 +190,8 @@ DOCTOR_SYSTEM_PROMPT = (
 class InMemoryRepository:
     """Stores sessions in memory. doctors is a set of phone numbers with DOCTOR role."""
 
-    def __init__(self, known_patients: dict = None, doctors: set = None):
+    def __init__(self, doctors: set = None):
         self._sessions: dict = {}
-        self._patients: dict = known_patients or {}
         self._doctors:  set  = doctors or set()
 
     def get_session(self, hospital_id: str, from_number: str) -> Optional[Session]:
@@ -202,9 +199,6 @@ class InMemoryRepository:
 
     def save_session(self, session: Session):
         self._sessions[f"{session.hospital_id}:{session.from_number}"] = session
-
-    def get_patient_id_by_phone(self, from_number: str, hospital_id: str) -> Optional[str]:
-        return self._patients.get(from_number)
 
     def get_role(self, from_number: str) -> Role:
         return Role.DOCTOR if from_number in self._doctors else Role.PATIENT
@@ -362,17 +356,6 @@ class WhatsAppOrchestrator:
                 session.pending_tool = None
                 session.history.append(ChatTurn(role=ChatRole.USER, content=wa_message.text))
 
-        elif session.state == SessionState.AWAITING_AUTH:
-            patient_id = self.repository.get_patient_id_by_phone(
-                wa_message.from_number, wa_message.hospital_id
-            )
-            if patient_id:
-                session.patient_id = patient_id
-                context.patient_id = patient_id
-                session.state      = SessionState.IDLE
-                self.repository.save_session(session)
-            session.history.append(ChatTurn(role=ChatRole.USER, content=wa_message.text))
-
         else:
             session.history.append(ChatTurn(role=ChatRole.USER, content=wa_message.text))
 
@@ -412,7 +395,7 @@ class WhatsAppOrchestrator:
                 self._responder("Sorry, you don't have permission to perform this action.", context)
                 return
 
-            if gate_result.status in (GateStatus.AUTH_REQUIRED, GateStatus.CONFIRM_REQUIRED):
+            if gate_result.status == GateStatus.CONFIRM_REQUIRED:
                 self._interrupt(gate_result, agent_response.tool_call, context)
                 return
 
@@ -444,15 +427,8 @@ class WhatsAppOrchestrator:
                 role         = self.repository.get_role(wa_message.from_number),
             )
 
-        if session.patient_id is None:
-            patient_id = self.repository.get_patient_id_by_phone(
-                wa_message.from_number, wa_message.hospital_id
-            )
-            if patient_id:
-                session.patient_id = patient_id
-
         self.repository.save_session(session)
-        return OrchestratorContext(wa_message, session, patient_id=session.patient_id)
+        return OrchestratorContext(wa_message, session, patient_id=None)
 
     def _gate(self, tool_call: ToolCall, context: OrchestratorContext) -> GateResult:
         allowed = ROLE_PERMISSIONS.get(tool_call.tool_name, {Role.PATIENT, Role.DOCTOR})
@@ -460,8 +436,6 @@ class WhatsAppOrchestrator:
             return GateResult(GateStatus.FORBIDDEN)
 
         if tool_call.tool_name == "appointment":
-            if context.patient_id is None:
-                return GateResult(GateStatus.AUTH_REQUIRED)
             if context.session.state != SessionState.AWAITING_CONFIRM:
                 return GateResult(GateStatus.CONFIRM_REQUIRED)
         return GateResult(GateStatus.OK)
@@ -486,18 +460,10 @@ class WhatsAppOrchestrator:
         print(f"\n  [TOOL] {tool_call.tool_name} -> {json.dumps(tool_call.args, indent=2)}\n")
 
     def _interrupt(self, gate_result: GateResult, tool_call: ToolCall, context: OrchestratorContext):
-        if gate_result.status == GateStatus.AUTH_REQUIRED:
-            message = (
-                "To proceed, I need to verify your identity. "
-                "Please share your Patient ID."
-            )
-            context.session.state = SessionState.AWAITING_AUTH
-
-        else:  # CONFIRM_REQUIRED
-            desc    = self._describe_tool(tool_call)
-            message = f"Please confirm: {desc}. Reply YES to proceed or NO to cancel."
-            context.session.pending_tool = tool_call
-            context.session.state        = SessionState.AWAITING_CONFIRM
+        desc    = self._describe_tool(tool_call)
+        message = f"Please confirm: {desc}. Reply YES to proceed or NO to cancel."
+        context.session.pending_tool = tool_call
+        context.session.state        = SessionState.AWAITING_CONFIRM
 
         self.repository.save_session(context.session)
         try:
