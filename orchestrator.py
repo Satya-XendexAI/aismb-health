@@ -149,13 +149,21 @@ ROLE_PERMISSIONS = {
     "kg_retriever": {Role.PATIENT, Role.DOCTOR},
 }
 
-SYSTEM_PROMPT = (
+PATIENT_SYSTEM_PROMPT = (
     "You are a helpful hospital WhatsApp assistant. Help patients with:\n"
     "- Booking and cancelling doctor appointments\n"
     "- Questions about doctors, departments, timings, and procedures\n"
     "- Fetching their own medical records, test results, and prescriptions\n\n"
     "Be polite, concise, and professional. Use tools to retrieve accurate data. "
     "Never fabricate information."
+)
+
+DOCTOR_SYSTEM_PROMPT = (
+    "You are a hospital assistant for medical staff. You can help with:\n"
+    "- Searching for doctors by specialization, symptom, language, or name\n"
+    "- Querying hospital data: appointments, test results, prescriptions, medications\n\n"
+    "You cannot book or cancel appointments — that is handled by patients directly. "
+    "Be concise and professional. Use tools to retrieve accurate data. Never fabricate information."
 )
 
 # ── In-Memory Repository ───────────────────────────────────────────────────────
@@ -192,8 +200,8 @@ class GeminiLLMAdapter:
         self.model  = model
         self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=120.0)
 
-    def run_agent(self, history: List[ChatTurn], tool_schemas: list) -> AgentResponse:
-        messages = [{"role": "system", "content": SYSTEM_PROMPT}] + self._build_messages(history)
+    def run_agent(self, history: List[ChatTurn], tool_schemas: list, system_prompt: str = PATIENT_SYSTEM_PROMPT) -> AgentResponse:
+        messages = [{"role": "system", "content": system_prompt}] + self._build_messages(history)
 
         completion = self.client.chat.completions.create(
             model=self.model,
@@ -349,13 +357,18 @@ class WhatsAppOrchestrator:
 
         # ── Step 2: ReAct loop ─────────────────────────────────────────────────
 
-        tool_schemas = DOCTOR_TOOLS if session.role == Role.DOCTOR else PATIENT_TOOLS
-        final_text   = self.fallback_text
+        if session.role == Role.DOCTOR:
+            tool_schemas  = DOCTOR_TOOLS
+            system_prompt = DOCTOR_SYSTEM_PROMPT
+        else:
+            tool_schemas  = PATIENT_TOOLS
+            system_prompt = PATIENT_SYSTEM_PROMPT
+        final_text = self.fallback_text
 
         for _ in range(self.max_iterations):
             print("  [Thinking...]", flush=True)
             try:
-                agent_response = self.llm.run_agent(session.history, tool_schemas)
+                agent_response = self.llm.run_agent(session.history, tool_schemas, system_prompt)
             except Exception as exc:
                 logger.error("LLM error: %s", exc)
                 print(f"  [LLM error: {exc}]")
