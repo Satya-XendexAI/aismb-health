@@ -119,6 +119,8 @@ _appointment_schema = {
                                      "description": "Patient's city or location (optional)"},
                 "symptoms":         {"type": "string",
                                      "description": "Patient's symptoms (optional)"},
+                "date":             {"type": "string",
+                                     "description": "Appointment date in YYYY-MM-DD format (optional, defaults to today)"},
             },
             "required": ["action", "doctor_id", "department", "patient_name"],
         },
@@ -477,11 +479,13 @@ class WhatsAppOrchestrator:
             doctor = tool_call.args.get("doctor_id", "the doctor")
             dept   = tool_call.args.get("department", "")
             name   = tool_call.args.get("patient_name", "")
+            date   = tool_call.args.get("date", "today")
             desc   = f"{action} appointment with {doctor}"
             if dept:
                 desc += f" ({dept})"
             if name:
                 desc += f" for {name}"
+            desc += f" on {date}"
             return desc
         if tool_call.tool_name == "kg_retriever":
             return f"knowledge graph query: {tool_call.args.get('query', '')}"
