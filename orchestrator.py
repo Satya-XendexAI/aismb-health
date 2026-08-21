@@ -37,9 +37,10 @@ class GateStatus(Enum):
 
 @dataclass
 class ToolCall:
-    tool_name:   str
-    args:        dict
-    tool_use_id: str = field(default_factory=lambda: f"toolu_{uuid.uuid4().hex[:12]}")
+    tool_name:        str
+    args:             dict
+    tool_use_id:      str           = field(default_factory=lambda: f"toolu_{uuid.uuid4().hex[:12]}")
+    thought_signature: str | None   = None
 
 @dataclass
 class ChatTurn:
@@ -80,7 +81,7 @@ class OrchestratorContext:
     session:    Session
     patient_id: Optional[str]
 
-# ── Tool Schemas (Anthropic format) ────────────────────────────────────────────
+# ── Tool Schemas ───────────────────────────────────────────────────────────────
 
 TOOL_SCHEMAS = [
     {
@@ -103,11 +104,11 @@ TOOL_SCHEMAS = [
         "type": "function",
         "function": {
             "name": "kg_retriever",
-            "description": "Answer questions about doctors, departments, timings, and hospital procedures.",
+            "description": "Find doctors by symptoms, specialization, name, language, or experience. Use for any query about finding or getting info on doctors.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "The patient's question"},
+                    "query": {"type": "string", "description": "The patient's query in their own words"},
                 },
                 "required": ["query"],
             },
@@ -160,55 +161,57 @@ class InMemoryRepository:
     def get_patient_id_by_phone(self, from_number: str, hospital_id: str) -> Optional[str]:
         return self._patients.get(from_number)
 
-# ── NVIDIA LLM Adapter (OpenAI-compatible) ─────────────────────────────────────
+# ── Gemini LLM Adapter ────────────────────────────────────────────────────────
 
-class NvidiaLLMAdapter:
+class GeminiLLMAdapter:
     def __init__(
         self,
-        model:    str = os.getenv("NVIDIA_MODEL", "meta/llama-3.1-70b-instruct"),
-        base_url: str = os.getenv("NVIDIA_BASE_URL", "https://integrate.api.nvidia.com/v1"),
-        api_key:  str = os.getenv("NVIDIA_API_KEY", ""),
+        model:    str = os.getenv("GEMINI_MODEL", "gemini-3.6-flash"),
+        base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/",
+        api_key:  str = os.getenv("GEMINI_API_KEY", ""),
     ):
         self.model  = model
-        self.client = OpenAI(base_url=base_url, api_key=api_key)
+        self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=120.0)
 
     def run_agent(self, history: List[ChatTurn], tool_schemas: list) -> AgentResponse:
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + self._build_messages(history)
 
-        response = self.client.chat.completions.create(
+        completion = self.client.chat.completions.create(
             model=self.model,
             messages=messages,
             tools=tool_schemas,
             tool_choice="auto",
-            temperature=1,
-            top_p=1,
-            max_tokens=4096,
+            temperature=1.0,
+            max_tokens=8192,
             stream=False,
         )
 
-        choice = response.choices[0]
+        choice        = completion.choices[0]
+        finish_reason = choice.finish_reason
+        message       = choice.message
 
-        if choice.finish_reason == "tool_calls" and choice.message.tool_calls:
-            tc = choice.message.tool_calls[0]
+        if finish_reason == "tool_calls" and message.tool_calls:
+            tc  = message.tool_calls[0]
+            sig = (tc.extra_content or {}).get("google", {}).get("thought_signature")
             return AgentResponse(
                 type=AgentResponseType.TOOL_CALL,
                 tool_call=ToolCall(
                     tool_name=tc.function.name,
                     args=json.loads(tc.function.arguments),
                     tool_use_id=tc.id,
+                    thought_signature=sig,
                 ),
             )
 
         return AgentResponse(
             type=AgentResponseType.TEXT,
-            text=choice.message.content or "",
+            text=message.content or "",
         )
 
     def _build_messages(self, history: List[ChatTurn]) -> list:
         messages = []
         for i, turn in enumerate(history):
             if turn.role == ChatRole.USER:
-                # Merge consecutive user messages (safety guard)
                 if messages and messages[-1]["role"] == "user":
                     messages[-1]["content"] += "\n" + turn.content
                 else:
@@ -216,23 +219,27 @@ class NvidiaLLMAdapter:
 
             elif turn.role == ChatRole.ASSISTANT:
                 if turn.tool_call:
+                    tc_entry = {
+                        "id":       turn.tool_call.tool_use_id,
+                        "type":     "function",
+                        "function": {
+                            "name":      turn.tool_call.tool_name,
+                            "arguments": json.dumps(turn.tool_call.args),
+                        },
+                    }
+                    if turn.tool_call.thought_signature:
+                        tc_entry["extra_content"] = {
+                            "google": {"thought_signature": turn.tool_call.thought_signature}
+                        }
                     messages.append({
                         "role":       "assistant",
                         "content":    None,
-                        "tool_calls": [{
-                            "id":       turn.tool_call.tool_use_id,
-                            "type":     "function",
-                            "function": {
-                                "name":      turn.tool_call.tool_name,
-                                "arguments": json.dumps(turn.tool_call.args),
-                            },
-                        }],
+                        "tool_calls": [tc_entry],
                     })
                 else:
                     messages.append({"role": "assistant", "content": turn.content or " "})
 
             elif turn.role == ChatRole.TOOL_RESULT:
-                # Locate the tool_use_id from the nearest preceding ASSISTANT tool_call
                 tool_use_id = "unknown"
                 for prev_turn in reversed(history[:i]):
                     if prev_turn.role == ChatRole.ASSISTANT and prev_turn.tool_call:
@@ -326,10 +333,12 @@ class WhatsAppOrchestrator:
         final_text = self.fallback_text
 
         for _ in range(self.max_iterations):
+            print("  [Thinking...]", flush=True)
             try:
                 agent_response = self.llm.run_agent(session.history, TOOL_SCHEMAS)
             except Exception as exc:
                 logger.error("LLM error: %s", exc)
+                print(f"  [LLM error: {exc}]")
                 break
 
             if agent_response.type == AgentResponseType.TEXT:
@@ -351,6 +360,7 @@ class WhatsAppOrchestrator:
 
             # Gate OK — execute and loop
             self._log_tool(agent_response.tool_call)
+            print("  [Executing tool, waiting for result...]", flush=True)
             result = self._execute_tool(agent_response.tool_call)
             session.history.append(ChatTurn(
                 role=ChatRole.TOOL_RESULT,
@@ -397,7 +407,8 @@ class WhatsAppOrchestrator:
         if tool_call.tool_name == "appointment":
             return {"status": "ok", "result": "Appointment tool executed (dummy)"}
         elif tool_call.tool_name == "kg_retriever":
-            return {"facts": ["Apollo Hospital Cardiology OPD: Mon-Sat 9am-1pm (dummy)"]}
+            from tools.kg_retriever import retrieve_context
+            return retrieve_context(**tool_call.args)
         elif tool_call.tool_name == "query_data":
             return {"data": "Patient records query result (dummy)"}
         return {"error": "unknown tool"}

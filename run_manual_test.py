@@ -5,8 +5,8 @@ Simulates a WhatsApp conversation in your terminal.
 Bot responses print immediately; session state persists across turns.
 
 Usage:
-    pip install anthropic
-    export ANTHROPIC_API_KEY=sk-ant-...
+    pip install openai python-dotenv
+    export GEMINI_API_KEY=...   # or set in .env
     python run_manual_test.py
 
 Commands during chat:
@@ -21,7 +21,7 @@ import logging
 from orchestrator import (
     WhatsAppOrchestrator,
     WAMessage,
-    NvidiaLLMAdapter,
+    GeminiLLMAdapter,
     PrintWANotifier,
     InMemoryRepository,
 )
@@ -68,7 +68,7 @@ def main():
     repository = InMemoryRepository(known_patients=KNOWN_PATIENTS)
 
     orc = WhatsAppOrchestrator(
-        llm=NvidiaLLMAdapter(),
+        llm=GeminiLLMAdapter(),
         notifier=PrintWANotifier(),
         repository=repository,
         fallback_text="I'm sorry, I couldn't process that. Please try again.",
