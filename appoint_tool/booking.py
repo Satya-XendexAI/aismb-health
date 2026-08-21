@@ -39,7 +39,7 @@ def _check_supported_mode(hospital) -> ErrorResult | None:
 # ETA CALCULATION
 # ═══════════════════════════════════════════════════════════════
 
-def calculate_eta(session, doctor, patients_ahead, booking_date=None):
+def calculate_eta(session, doctor, patients_ahead):
     """
     Works out roughly what time this patient will actually be seen.
 
@@ -137,7 +137,7 @@ def book(conn, payload):
     patients_ahead = db.count_patients_ahead(
         conn, session["session_id"], token["token_number"]
     )
-    estimated_time = calculate_eta(session, doctor, patients_ahead, payload.date)
+    estimated_time = calculate_eta(session, doctor, patients_ahead)
 
     # ─── Step 8: Return confirmation ──────────────────────────
     return BookingConfirmation(

@@ -55,7 +55,6 @@ def print_status(from_number: str, repository: InMemoryRepository):
         return
     print(f"\n  [STATUS] number={from_number}")
     print(f"           role={session.role.value}")
-    print(f"           patient_id={session.patient_id}")
     print(f"           state={session.state.value}")
     print(f"           history_turns={len(session.history)}")
     print(f"           pending_tool={session.pending_tool}\n")

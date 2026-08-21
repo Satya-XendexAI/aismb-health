@@ -69,7 +69,6 @@ class Session:
     session_id:   str
     hospital_id:  str
     from_number:  str
-    patient_id:   Optional[str]
     state:        SessionState
     history:      List[ChatTurn]
     pending_tool: Optional[ToolCall]
@@ -89,7 +88,6 @@ class GateResult:
 class OrchestratorContext:
     wa_message: WAMessage
     session:    Session
-    patient_id: Optional[str]
 
 # ── Tool Schemas ───────────────────────────────────────────────────────────────
 
@@ -398,7 +396,7 @@ class WhatsAppOrchestrator:
                 return
 
             if gate_result.status == GateStatus.CONFIRM_REQUIRED:
-                self._interrupt(gate_result, agent_response.tool_call, context)
+                self._interrupt(agent_response.tool_call, context)
                 return
 
             # Gate OK — execute and loop
@@ -422,7 +420,6 @@ class WhatsAppOrchestrator:
                 session_id   = str(uuid.uuid4()),
                 hospital_id  = wa_message.hospital_id,
                 from_number  = wa_message.from_number,
-                patient_id   = None,
                 state        = SessionState.IDLE,
                 history      = [],
                 pending_tool = None,
@@ -430,16 +427,14 @@ class WhatsAppOrchestrator:
             )
 
         self.repository.save_session(session)
-        return OrchestratorContext(wa_message, session, patient_id=None)
+        return OrchestratorContext(wa_message, session)
 
     def _gate(self, tool_call: ToolCall, context: OrchestratorContext) -> GateResult:
         allowed = ROLE_PERMISSIONS.get(tool_call.tool_name, {Role.PATIENT, Role.DOCTOR})
         if context.session.role not in allowed:
             return GateResult(GateStatus.FORBIDDEN)
-
-        if tool_call.tool_name == "appointment":
-            if context.session.state != SessionState.AWAITING_CONFIRM:
-                return GateResult(GateStatus.CONFIRM_REQUIRED)
+        if tool_call.tool_name == "appointment" and context.session.state != SessionState.AWAITING_CONFIRM:
+            return GateResult(GateStatus.CONFIRM_REQUIRED)
         return GateResult(GateStatus.OK)
 
     def _execute_tool(self, tool_call: ToolCall, context: OrchestratorContext) -> dict:
@@ -461,7 +456,7 @@ class WhatsAppOrchestrator:
     def _log_tool(self, tool_call: ToolCall):
         print(f"\n  [TOOL] {tool_call.tool_name} -> {json.dumps(tool_call.args, indent=2)}\n")
 
-    def _interrupt(self, gate_result: GateResult, tool_call: ToolCall, context: OrchestratorContext):
+    def _interrupt(self, tool_call: ToolCall, context: OrchestratorContext):
         desc    = self._describe_tool(tool_call)
         message = f"Please confirm: {desc}. Reply YES to proceed or NO to cancel."
         context.session.pending_tool = tool_call
@@ -474,22 +469,18 @@ class WhatsAppOrchestrator:
             pass
 
     def _describe_tool(self, tool_call: ToolCall) -> str:
-        if tool_call.tool_name == "appointment":
-            action = tool_call.args.get("action", "BOOK").upper()
-            doctor = tool_call.args.get("doctor_id", "the doctor")
-            dept   = tool_call.args.get("department", "")
-            name   = tool_call.args.get("patient_name", "")
-            date   = tool_call.args.get("date", "today")
-            desc   = f"{action} appointment with {doctor}"
-            if dept:
-                desc += f" ({dept})"
-            if name:
-                desc += f" for {name}"
-            desc += f" on {date}"
-            return desc
-        if tool_call.tool_name == "kg_retriever":
-            return f"knowledge graph query: {tool_call.args.get('query', '')}"
-        return f"data query: {tool_call.args.get('query_type', '')}"
+        action = tool_call.args.get("action", "BOOK").upper()
+        doctor = tool_call.args.get("doctor_id", "the doctor")
+        dept   = tool_call.args.get("department", "")
+        name   = tool_call.args.get("patient_name", "")
+        date   = tool_call.args.get("date", "today")
+        desc   = f"{action} appointment with {doctor}"
+        if dept:
+            desc += f" ({dept})"
+        if name:
+            desc += f" for {name}"
+        desc += f" on {date}"
+        return desc
 
     def _responder(self, text: str, context: OrchestratorContext):
         for chunk in self._chunk(text, max_chars=1000):
