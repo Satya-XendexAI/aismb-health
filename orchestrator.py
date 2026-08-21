@@ -1,3 +1,4 @@
+import sys
 import uuid
 import json
 import logging
@@ -9,6 +10,11 @@ from dotenv import load_dotenv
 from openai import OpenAI
 
 load_dotenv()  # reads .env from current directory
+
+# Make appoint_tool importable (its internal imports are module-relative)
+_APPOINT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "appoint_tool")
+if _APPOINT_DIR not in sys.path:
+    sys.path.insert(0, _APPOINT_DIR)
 
 logger = logging.getLogger(__name__)
 
@@ -93,15 +99,30 @@ _appointment_schema = {
     "type": "function",
     "function": {
         "name": "appointment",
-        "description": "Book or cancel a doctor appointment for the patient.",
+        "description": (
+            "Book or cancel a token (queue-based) appointment for the patient. "
+            "Always call kg_retriever first to get the doctor_id and department. "
+            "Ask for patient_name before calling this tool if not already known."
+        ),
         "parameters": {
             "type": "object",
             "properties": {
-                "action":      {"type": "string", "enum": ["book", "cancel"]},
-                "doctor_name": {"type": "string", "description": "Name of the doctor"},
-                "date":        {"type": "string", "description": "Date e.g. 2026-08-20"},
+                "action":           {"type": "string", "enum": ["BOOK", "CANCEL"],
+                                     "description": "BOOK to book a new token, CANCEL to cancel existing"},
+                "doctor_id":        {"type": "string",
+                                     "description": "Doctor's ID from kg_retriever results (sql_id field)"},
+                "department":       {"type": "string",
+                                     "description": "Doctor's department or specialization"},
+                "patient_name":     {"type": "string",
+                                     "description": "Patient's full name"},
+                "patient_age":      {"type": "integer",
+                                     "description": "Patient's age (optional)"},
+                "patient_location": {"type": "string",
+                                     "description": "Patient's city or location (optional)"},
+                "symptoms":         {"type": "string",
+                                     "description": "Patient's symptoms (optional)"},
             },
-            "required": ["action"],
+            "required": ["action", "doctor_id", "department", "patient_name"],
         },
     },
 }
@@ -321,7 +342,7 @@ class WhatsAppOrchestrator:
                 session.state        = SessionState.IDLE
                 self.repository.save_session(session)
                 self._log_tool(tool_call)
-                result = self._execute_tool(tool_call)
+                result = self._execute_tool(tool_call, context)
                 session.history.append(ChatTurn(
                     role=ChatRole.TOOL_RESULT,
                     content=json.dumps(result),
@@ -398,7 +419,7 @@ class WhatsAppOrchestrator:
             # Gate OK — execute and loop
             self._log_tool(agent_response.tool_call)
             print("  [Executing tool, waiting for result...]", flush=True)
-            result = self._execute_tool(agent_response.tool_call)
+            result = self._execute_tool(agent_response.tool_call, context)
             session.history.append(ChatTurn(
                 role=ChatRole.TOOL_RESULT,
                 content=json.dumps(result),
@@ -445,9 +466,15 @@ class WhatsAppOrchestrator:
                 return GateResult(GateStatus.CONFIRM_REQUIRED)
         return GateResult(GateStatus.OK)
 
-    def _execute_tool(self, tool_call: ToolCall) -> dict:
+    def _execute_tool(self, tool_call: ToolCall, context: OrchestratorContext) -> dict:
         if tool_call.tool_name == "appointment":
-            return {"status": "ok", "result": "Appointment tool executed (dummy)"}
+            from app import handle_request
+            payload = {
+                **tool_call.args,
+                "hospital_id":   context.wa_message.hospital_id,
+                "patient_phone": context.wa_message.from_number,
+            }
+            return handle_request(payload)
         elif tool_call.tool_name == "kg_retriever":
             from tools.kg_retriever import retrieve_context
             return retrieve_context(**tool_call.args)
@@ -480,10 +507,16 @@ class WhatsAppOrchestrator:
 
     def _describe_tool(self, tool_call: ToolCall) -> str:
         if tool_call.tool_name == "appointment":
-            action = tool_call.args.get("action", "appointment")
-            doctor = tool_call.args.get("doctor_name", "the doctor")
-            date   = tool_call.args.get("date", "")
-            return f"{action} appointment with {doctor}" + (f" on {date}" if date else "")
+            action = tool_call.args.get("action", "BOOK").upper()
+            doctor = tool_call.args.get("doctor_id", "the doctor")
+            dept   = tool_call.args.get("department", "")
+            name   = tool_call.args.get("patient_name", "")
+            desc   = f"{action} appointment with {doctor}"
+            if dept:
+                desc += f" ({dept})"
+            if name:
+                desc += f" for {name}"
+            return desc
         if tool_call.tool_name == "kg_retriever":
             return f"knowledge graph query: {tool_call.args.get('query', '')}"
         return f"data query: {tool_call.args.get('query_type', '')}"
