@@ -100,6 +100,37 @@ def _generate_sql(question: str, schema_text: str, tables: list, doctor_name: st
     return sql.strip()
 
 
+def _validate_sql(sql: str, schema_text: str) -> str:
+    """
+    Second LLM call: verify all tables and columns in the SQL exist in the schema.
+    Returns the original SQL if valid, or a corrected SQL if not.
+    """
+    prompt = (
+        "You are a SQL validator for a hospital database.\n"
+        "Given the table schemas below and a SQL query, check whether every table "
+        "and every column referenced in the query actually exists in the schema.\n\n"
+        "If the SQL is fully valid (all tables and columns exist), return it unchanged.\n"
+        "If the SQL references any non-existent table or column, rewrite it using only "
+        "the tables and columns that are listed in the schema.\n\n"
+        "Rules:\n"
+        "- Keep the WHERE doctor_id = %%(doctor_id)s filter exactly as-is\n"
+        "- Return only the SQL query, no explanation, no markdown fences\n\n"
+        f"Schema:\n{schema_text}\n\n"
+        f"SQL:\n{sql}"
+    )
+    client = _llm_client()
+    response = client.chat.completions.create(
+        model=_SMALL_MODEL,
+        messages=[{"role": "user", "content": prompt}],
+        temperature=0.0,
+        max_tokens=512,
+    )
+    validated = response.choices[0].message.content or sql
+    validated = re.sub(r"^```[a-z]*\n?", "", validated.strip(), flags=re.IGNORECASE)
+    validated = re.sub(r"\n?```$", "", validated.strip())
+    return validated.strip()
+
+
 def _is_safe(sql: str) -> bool:
     """Return True only if the SQL is a plain SELECT with no forbidden keywords."""
     stripped = sql.strip().lstrip("-– \t\n")
@@ -157,6 +188,12 @@ def run_query(question: str, doctor_phone: str, repository) -> dict:
         except Exception as exc:
             logger.error("LLM SQL generation failed: %s", exc)
             return {"error": "Could not generate query"}
+
+        # 4b. Validate + fix hallucinated columns/tables via second LLM call
+        try:
+            sql = _validate_sql(sql, schema_text)
+        except Exception as exc:
+            logger.warning("SQL validation LLM failed, proceeding with original: %s", exc)
 
         # 5. Safety check — SELECT only, no forbidden keywords
         if not _is_safe(sql):
