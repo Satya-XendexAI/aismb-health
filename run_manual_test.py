@@ -32,7 +32,7 @@ from orchestrator import (
 HOSPITAL_ID = "glngs-chn"   # must match hospital_id in the DB
 
 with open("config/doctors.json") as f:
-    DOCTORS = set(json.load(f)["doctors"])
+    DOCTORS = json.load(f)["doctors"]   # list of dicts
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -79,7 +79,7 @@ def main():
 
     raw = input("  Enter your WhatsApp number: ").strip()
     from_number = raw if raw else "+91-9999999999"
-    print(f"\n  Using: {from_number}  (doctor={from_number in DOCTORS})\n")
+    print(f"\n  Using: {from_number}  (doctor={any(d['phone'] == from_number for d in DOCTORS)})\n")
     print("-" * 55)
 
     while True:
@@ -99,7 +99,7 @@ def main():
         if text.lower() == "switch":
             raw = input("  New number (Enter for +91-known): ").strip()
             from_number = raw if raw else "+91-unknown"
-            print(f"  Switched to: {from_number}  (doctor={from_number in DOCTORS})\n")
+            print(f"  Switched to: {from_number}  (doctor={any(d['phone'] == from_number for d in DOCTORS)})\n")
             continue
 
         if text.lower() == "status":

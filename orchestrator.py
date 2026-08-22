@@ -144,17 +144,16 @@ _query_data_schema = {
     "type": "function",
     "function": {
         "name": "query_data",
-        "description": "Query hospital database: fetch appointments, test results, prescriptions, or medications.",
+        "description": "Query your patients' appointment and token data using a natural language question.",
         "parameters": {
             "type": "object",
             "properties": {
-                "query_type": {
+                "question": {
                     "type": "string",
-                    "enum": ["appointments", "test_results", "prescriptions", "medications"],
+                    "description": "Natural language question about your patients or tokens",
                 },
-                "filters": {"type": "object"},
             },
-            "required": ["query_type"],
+            "required": ["question"],
         },
     },
 }
@@ -188,11 +187,11 @@ DOCTOR_SYSTEM_PROMPT = (
 # ── In-Memory Repository ───────────────────────────────────────────────────────
 
 class InMemoryRepository:
-    """Stores sessions in memory. doctors is a set of phone numbers with DOCTOR role."""
+    """Stores sessions in memory. doctors is a list of doctor config dicts."""
 
-    def __init__(self, doctors: set = None):
+    def __init__(self, doctors: list = None):
         self._sessions: dict = {}
-        self._doctors:  set  = doctors or set()
+        self._doctors:  list = doctors or []
 
     def get_session(self, hospital_id: str, from_number: str) -> Optional[Session]:
         return self._sessions.get(f"{hospital_id}:{from_number}")
@@ -201,7 +200,10 @@ class InMemoryRepository:
         self._sessions[f"{session.hospital_id}:{session.from_number}"] = session
 
     def get_role(self, from_number: str) -> Role:
-        return Role.DOCTOR if from_number in self._doctors else Role.PATIENT
+        return Role.DOCTOR if any(d["phone"] == from_number for d in self._doctors) else Role.PATIENT
+
+    def get_doctor_config(self, from_number: str) -> dict | None:
+        return next((d for d in self._doctors if d["phone"] == from_number), None)
 
 # ── Gemini LLM Adapter ────────────────────────────────────────────────────────
 
@@ -450,7 +452,12 @@ class WhatsAppOrchestrator:
             from tools.kg_retriever import retrieve_context
             return retrieve_context(**tool_call.args)
         elif tool_call.tool_name == "query_data":
-            return {"data": "Patient records query result (dummy)"}
+            from tools.query_data import run_query
+            return run_query(
+                question=tool_call.args["question"],
+                doctor_phone=context.wa_message.from_number,
+                repository=self.repository,
+            )
         return {"error": "unknown tool"}
 
     def _log_tool(self, tool_call: ToolCall):
