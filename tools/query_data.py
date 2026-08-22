@@ -9,6 +9,8 @@ SQL generation and information_schema for live schema introspection.
 import os
 import re
 import logging
+import decimal
+import datetime
 import psycopg2
 import psycopg2.extras
 from openai import OpenAI
@@ -108,6 +110,19 @@ def _is_safe(sql: str) -> bool:
     return True
 
 
+def _serialize_row(row: dict) -> dict:
+    """Convert Postgres types that json.dumps can't handle (datetime, Decimal, etc.)."""
+    result = {}
+    for k, v in row.items():
+        if isinstance(v, (datetime.datetime, datetime.date, datetime.time)):
+            result[k] = v.isoformat()
+        elif isinstance(v, decimal.Decimal):
+            result[k] = float(v)
+        else:
+            result[k] = v
+    return result
+
+
 def run_query(question: str, doctor_phone: str, repository) -> dict:
     """
     Translate a natural-language question into a scoped SQL query and execute it.
@@ -157,7 +172,7 @@ def run_query(question: str, doctor_phone: str, repository) -> dict:
             logger.error("Query execution failed: %s", exc)
             return {"error": f"Query failed: {exc}"}
 
-        rows    = [dict(r) for r in raw_rows]
+        rows    = [_serialize_row(dict(r)) for r in raw_rows]
         columns = list(rows[0].keys()) if rows else []
         return {"rows": rows, "columns": columns, "sql": sql}
 
