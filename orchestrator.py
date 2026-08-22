@@ -285,14 +285,17 @@ class GeminiLLMAdapter:
 
             elif turn.role == ChatRole.TOOL_RESULT:
                 tool_use_id = "unknown"
+                tool_name   = "unknown"
                 for prev_turn in reversed(history[:i]):
                     if prev_turn.role == ChatRole.ASSISTANT and prev_turn.tool_call:
                         tool_use_id = prev_turn.tool_call.tool_use_id
+                        tool_name   = prev_turn.tool_call.tool_name
                         break
 
                 messages.append({
                     "role":         "tool",
                     "tool_call_id": tool_use_id,
+                    "name":         tool_name,
                     "content":      turn.content,
                 })
 
