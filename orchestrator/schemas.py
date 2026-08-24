@@ -67,8 +67,9 @@ _query_data_schema = {
     },
 }
 
-PATIENT_TOOLS = [_appointment_schema, _kg_retriever_schema]
-DOCTOR_TOOLS  = [_kg_retriever_schema, _query_data_schema]
+PATIENT_TOOLS        = [_appointment_schema, _kg_retriever_schema]
+PATIENT_TOOLS_WARMUP = [_kg_retriever_schema]   # appointment stripped for conversational warmup turns
+DOCTOR_TOOLS         = [_kg_retriever_schema, _query_data_schema]
 
 ROLE_PERMISSIONS = {
     "appointment":  {Role.PATIENT},

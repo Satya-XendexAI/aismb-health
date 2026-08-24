@@ -7,10 +7,16 @@ from models.session import (
     Session, SessionState, Role, ChatRole, ChatTurn,
     AgentResponseType, GateStatus, GateResult, OrchestratorContext, WAMessage,
 )
-from orchestrator.schemas import PATIENT_TOOLS, DOCTOR_TOOLS, ROLE_PERMISSIONS
+from orchestrator.schemas import PATIENT_TOOLS, PATIENT_TOOLS_WARMUP, DOCTOR_TOOLS, ROLE_PERMISSIONS
 from prompts.system import PATIENT_SYSTEM_PROMPT, DOCTOR_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
+
+_BOOKING_KEYWORDS = {"book", "appointment", "cancel", "token", "schedule", "register", "slot"}
+
+def _detect_booking_intent(text: str) -> bool:
+    lowered = text.lower()
+    return any(kw in lowered for kw in _BOOKING_KEYWORDS)
 
 
 class WhatsAppOrchestrator:
@@ -62,14 +68,18 @@ class WhatsAppOrchestrator:
                 session.history.append(ChatTurn(role=ChatRole.USER, content=wa_message.text))
 
         else:
+            if session.turn_count == 0 and session.role == Role.PATIENT:
+                session.booking_intent = _detect_booking_intent(wa_message.text)
+            session.turn_count += 1
             session.history.append(ChatTurn(role=ChatRole.USER, content=wa_message.text))
 
         if session.role == Role.DOCTOR:
             tool_schemas  = DOCTOR_TOOLS
             system_prompt = DOCTOR_SYSTEM_PROMPT
         else:
-            tool_schemas  = PATIENT_TOOLS
-            system_prompt = PATIENT_SYSTEM_PROMPT
+            use_full_tools = session.booking_intent or session.turn_count >= 3
+            tool_schemas   = PATIENT_TOOLS if use_full_tools else PATIENT_TOOLS_WARMUP
+            system_prompt  = PATIENT_SYSTEM_PROMPT
         final_text = self.fallback_text
 
         for _ in range(self.max_iterations):

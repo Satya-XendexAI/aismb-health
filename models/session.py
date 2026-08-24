@@ -49,13 +49,15 @@ class WAMessage:
 
 @dataclass
 class Session:
-    session_id:   str
-    hospital_id:  str
-    from_number:  str
-    state:        SessionState
-    history:      List[ChatTurn]
-    pending_tool: Optional[ToolCall]
-    role:         Role = Role.PATIENT
+    session_id:     str
+    hospital_id:    str
+    from_number:    str
+    state:          SessionState
+    history:        List[ChatTurn]
+    pending_tool:   Optional[ToolCall]
+    role:           Role = Role.PATIENT
+    turn_count:     int  = 0
+    booking_intent: bool = False
 
 @dataclass
 class AgentResponse:
