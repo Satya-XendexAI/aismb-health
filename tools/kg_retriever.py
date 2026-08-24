@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sqlite3
 from pathlib import Path
 
@@ -141,8 +142,21 @@ def find_doctors_by_language(lang: str, limit: int = 20, tenant_id: str | None =
         return [dict(r) for r in res]
 
 
+def _sanitize_lucene(keyword: str) -> str:
+    keyword = keyword.strip()
+    # LLM sometimes returns a Python list repr — extract individual names and OR them
+    if keyword.startswith("[") and keyword.endswith("]"):
+        names = re.findall(r"'([^']+)'|\"([^\"]+)\"", keyword)
+        flat  = [n[0] or n[1] for n in names if n[0] or n[1]]
+        if flat:
+            return " OR ".join(f'"{n}"' for n in flat)
+    # Strip Lucene special characters that would break the query parser
+    return re.sub(r'[+\-!(){}\[\]^"~*?:\\]', " ", keyword).strip()
+
+
 def find_by_fulltext(keyword: str, limit: int = 20, tenant_id: str | None = None) -> list[dict]:
-    term = keyword
+    keyword = _sanitize_lucene(keyword)
+    term    = keyword
     if " " not in keyword and len(keyword) >= 3:
         term = f"{keyword} OR {keyword}*"
     with _driver.session(database=_DB) as s:
