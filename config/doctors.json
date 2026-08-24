@@ -2,7 +2,7 @@
   "doctors": [
     {
       "doctor_id": "dr-karthick-anjaneyan-j-chn",
-      "phone": "+91-9940142234",
+      "phone": "916300769676",
       "name": "Dr. Karthick Anjaneyan J",
       "tables": ["patients", "tokens"]
     }
