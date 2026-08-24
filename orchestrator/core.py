@@ -13,10 +13,20 @@ from prompts.system import PATIENT_SYSTEM_PROMPT, DOCTOR_SYSTEM_PROMPT
 logger = logging.getLogger(__name__)
 
 _BOOKING_KEYWORDS = {"book", "appointment", "cancel", "token", "schedule", "register", "slot"}
+_AFFIRMATIVE      = {"yes", "y", "ok", "okay", "sure", "book", "confirm", "go ahead", "proceed", "yeah", "yep", "do it"}
+_NEGATIVE         = {"no", "n", "cancel", "stop", "nope", "never mind", "nevermind", "nah", "don't"}
 
 def _detect_booking_intent(text: str) -> bool:
     lowered = text.lower()
     return any(kw in lowered for kw in _BOOKING_KEYWORDS)
+
+def _is_affirmative(text: str) -> bool:
+    lowered = text.strip().lower()
+    return lowered in _AFFIRMATIVE or any(kw in lowered for kw in {"yes", "book", "confirm", "go ahead", "proceed", "sure", "ok"})
+
+def _is_negative(text: str) -> bool:
+    lowered = text.strip().lower()
+    return lowered in _NEGATIVE or any(kw in lowered for kw in {"no", "cancel", "stop", "don't"})
 
 
 class WhatsAppOrchestrator:
@@ -41,9 +51,7 @@ class WhatsAppOrchestrator:
         session = context.session
 
         if session.state == SessionState.AWAITING_CONFIRM:
-            reply = wa_message.text.strip().upper()
-
-            if reply == "YES":
+            if _is_affirmative(wa_message.text):
                 tool_call            = session.pending_tool
                 session.pending_tool = None
                 session.state        = SessionState.IDLE
@@ -55,7 +63,7 @@ class WhatsAppOrchestrator:
                     content=json.dumps(result),
                 ))
 
-            elif reply == "NO":
+            elif _is_negative(wa_message.text):
                 session.pending_tool = None
                 session.state        = SessionState.IDLE
                 session.history.append(ChatTurn(role=ChatRole.USER, content=wa_message.text))
@@ -63,9 +71,9 @@ class WhatsAppOrchestrator:
                 return
 
             else:
-                session.state        = SessionState.IDLE
-                session.pending_tool = None
-                session.history.append(ChatTurn(role=ChatRole.USER, content=wa_message.text))
+                # Stay in AWAITING_CONFIRM — don't reset, just re-prompt
+                self._responder("Please reply *YES* to confirm or *NO* to cancel.", context)
+                return
 
         else:
             if session.turn_count == 0 and session.role == Role.PATIENT:
