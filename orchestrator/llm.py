@@ -30,7 +30,7 @@ class GeminiLLMAdapter:
             messages=messages,
             tools=tool_schemas,
             tool_choice="auto",
-            temperature=1.0,
+            temperature=float(os.getenv("GEMINI_TEMPERATURE", "1.0")),
             max_tokens=8192,
             stream=False,
         )
@@ -38,6 +38,7 @@ class GeminiLLMAdapter:
         choice        = completion.choices[0]
         finish_reason = choice.finish_reason
         message       = choice.message
+
 
         if finish_reason == "tool_calls" and message.tool_calls:
             tc  = message.tool_calls[0]
@@ -104,7 +105,6 @@ class GeminiLLMAdapter:
                 })
 
         return messages
-
 
 class PrintWANotifier:
     def send(self, to_number: str, text: str):

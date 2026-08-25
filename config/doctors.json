@@ -4,7 +4,7 @@
       "doctor_id": "dr-ajit-yadav--chn",
       "phone": "911234567898",
       "name": "Dr. Ajit Yadav",
-      "tables": ["patients", "tokens"]
+      "tables": ["patients", "tokens", "doctor_sessions"]
     }
   ]
 }
