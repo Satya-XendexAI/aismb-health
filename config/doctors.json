@@ -1,9 +1,9 @@
 {
   "doctors": [
     {
-      "doctor_id": "dr-karthick-anjaneyan-j-chn",
+      "doctor_id": "dr-prasanna-karthik-s--chn",
       "phone": "916300769676",
-      "name": "Dr. Karthick Anjaneyan J",
+      "name": "Dr. Prasanna Karthik S",
       "tables": ["patients", "tokens"]
     }
   ]
