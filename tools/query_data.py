@@ -15,6 +15,7 @@ import psycopg2
 import psycopg2.extras
 from openai import OpenAI
 from dotenv import load_dotenv
+from prompts.query_data import sql_generate, sql_validate
 
 load_dotenv()
 
@@ -73,19 +74,7 @@ def _fetch_schemas(conn, tables: list) -> str:
 
 
 def _generate_sql(question: str, schema_text: str, tables: list, doctor_name: str) -> str:
-    """Call small LLM to generate a SELECT query for the given question."""
-    prompt = (
-        f"You are a SQL assistant for a hospital database.\n"
-        f"Generate a single read-only SELECT query to answer the question for doctor: {doctor_name}.\n\n"
-        f"Rules:\n"
-        f"- Only query these tables: {', '.join(tables)}\n"
-        f"- Always filter by doctor_id = %(doctor_id)s (use this exact placeholder)\n"
-        f"- Return only a SELECT statement — no INSERT, UPDATE, DELETE, DROP, or DDL\n"
-        f"- Use standard PostgreSQL syntax\n"
-        f"- Return only the SQL, no explanation, no markdown fences\n\n"
-        f"Table schemas:\n{schema_text}\n\n"
-        f"Question: {question}"
-    )
+    prompt = sql_generate(question, schema_text, tables, doctor_name)
     client = _llm_client()
     response = client.chat.completions.create(
         model=_SMALL_MODEL,
@@ -94,30 +83,13 @@ def _generate_sql(question: str, schema_text: str, tables: list, doctor_name: st
         max_tokens=512,
     )
     sql = response.choices[0].message.content or ""
-    # Strip markdown fences if the model wraps the SQL
     sql = re.sub(r"^```[a-z]*\n?", "", sql.strip(), flags=re.IGNORECASE)
     sql = re.sub(r"\n?```$", "", sql.strip())
     return sql.strip()
 
 
 def _validate_sql(sql: str, schema_text: str) -> str:
-    """
-    Second LLM call: verify all tables and columns in the SQL exist in the schema.
-    Returns the original SQL if valid, or a corrected SQL if not.
-    """
-    prompt = (
-        "You are a SQL validator for a hospital database.\n"
-        "Given the table schemas below and a SQL query, check whether every table "
-        "and every column referenced in the query actually exists in the schema.\n\n"
-        "If the SQL is fully valid (all tables and columns exist), return it unchanged.\n"
-        "If the SQL references any non-existent table or column, rewrite it using only "
-        "the tables and columns that are listed in the schema.\n\n"
-        "Rules:\n"
-        "- Keep the WHERE doctor_id = %%(doctor_id)s filter exactly as-is\n"
-        "- Return only the SQL query, no explanation, no markdown fences\n\n"
-        f"Schema:\n{schema_text}\n\n"
-        f"SQL:\n{sql}"
-    )
+    prompt = sql_validate(sql, schema_text)
     client = _llm_client()
     response = client.chat.completions.create(
         model=_SMALL_MODEL,
