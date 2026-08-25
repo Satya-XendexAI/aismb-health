@@ -74,8 +74,8 @@ def find_doctors_by_specialization(spec: str, limit: int = 20, tenant_id: str | 
     root   = spec[:5].lower() if len(spec) >= 5 else spec.lower()
     lucene = f"{spec} OR {root}*" if root != spec.lower() else spec
     where  = "WHERE d.tenant_id STARTS WITH $tenant_id" if tenant_id else ""
-    with _driver.session(database=_DB) as s:
-        res = s.run(
+    def _tx(tx):
+        res = tx.run(
             f"""
             CALL db.index.fulltext.queryNodes('spec_ft', $spec) YIELD node AS s, score
             MATCH (d:Doctor)-[:SPECIALIZES_IN]->(s)
@@ -94,11 +94,14 @@ def find_doctors_by_specialization(spec: str, limit: int = 20, tenant_id: str | 
         )
         return [dict(r) for r in res]
 
+    with _driver.session(database=_DB) as s:
+        return s.execute_read(_tx)
+
 
 def find_doctors_by_language(lang: str, limit: int = 20, tenant_id: str | None = None) -> list[dict]:
     where = "AND d.tenant_id STARTS WITH $tenant_id" if tenant_id else ""
-    with _driver.session(database=_DB) as s:
-        res = s.run(
+    def _tx(tx):
+        res = tx.run(
             f"""
             MATCH (d:Doctor)-[:SPEAKS]->(l:Language)
             WHERE toLower(l.name) CONTAINS toLower($lang)
@@ -118,6 +121,9 @@ def find_doctors_by_language(lang: str, limit: int = 20, tenant_id: str | None =
         )
         return [dict(r) for r in res]
 
+    with _driver.session(database=_DB) as s:
+        return s.execute_read(_tx)
+
 
 def _sanitize_lucene(keyword: str) -> str:
     keyword = keyword.strip()
@@ -136,8 +142,8 @@ def find_by_fulltext(keyword: str, limit: int = 20, tenant_id: str | None = None
     term    = keyword
     if " " not in keyword and len(keyword) >= 3:
         term = f"{keyword} OR {keyword}*"
-    with _driver.session(database=_DB) as s:
-        res = s.run(
+    def _tx(tx):
+        res = tx.run(
             """
             CALL db.index.fulltext.queryNodes('doctor_ft', $term) YIELD node AS d, score
             WHERE $tenant_id IS NULL OR d.tenant_id STARTS WITH $tenant_id
@@ -160,13 +166,16 @@ def find_by_fulltext(keyword: str, limit: int = 20, tenant_id: str | None = None
         )
         return [dict(r) for r in res]
 
+    with _driver.session(database=_DB) as s:
+        return s.execute_read(_tx)
+
 # ── Vector search against Neo4j-stored embeddings ─────────────────────────────
 
 def semantic_search(query: str, n_results: int = 8, tenant_id: str | None = None) -> list[dict]:
     q_vec       = embed(query)
     tenant_filter = "AND d.tenant_id STARTS WITH $tenant_id" if tenant_id else ""
-    with _driver.session(database=_DB) as s:
-        res = s.run(
+    def _tx(tx):
+        res = tx.run(
             f"""
             MATCH (d:Doctor)
             WHERE d.embedding IS NOT NULL
@@ -184,7 +193,10 @@ def semantic_search(query: str, n_results: int = 8, tenant_id: str | None = None
             """,
             tenant_id=tenant_id,
         )
-        rows = [dict(r) for r in res]
+        return [dict(r) for r in res]
+
+    with _driver.session(database=_DB) as s:
+        rows = s.execute_read(_tx)
 
     if not rows:
         return []
