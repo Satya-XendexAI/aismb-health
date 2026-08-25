@@ -10,6 +10,7 @@ Usage:
 """
 
 import os
+import re
 import json
 import hmac
 import hashlib
@@ -41,6 +42,11 @@ with open("config/doctors.json") as f:
 
 # ── Outgoing messages ─────────────────────────────────────────────────────
 
+def to_whatsapp_markdown(text: str) -> str:
+    """Convert standard **bold** markdown to WhatsApp's own *bold* syntax."""
+    return re.sub(r"\*\*(.+?)\*\*", r"*\1*", text)
+
+
 class WhatsAppNotifier:
     """Sends outgoing text messages via the Meta Graph API."""
 
@@ -50,7 +56,7 @@ class WhatsAppNotifier:
             "recipient_type":    "individual",
             "to":                to_number,
             "type":              "text",
-            "text":              {"body": text, "preview_url": False},
+            "text":              {"body": to_whatsapp_markdown(text), "preview_url": False},
         }
         headers = {"Authorization": f"Bearer {ACCESS_TOKEN}"}
 
