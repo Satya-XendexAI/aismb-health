@@ -1,9 +1,9 @@
 {
   "doctors": [
     {
-      "doctor_id": "dr-karthick-anjaneyan-j-chn",
-      "phone": "+91-9940142234",
-      "name": "Dr. Karthick Anjaneyan J",
+      "doctor_id": "dr-ajit-yadav--chn",
+      "phone": "911234567898",
+      "name": "Dr. Ajit Yadav",
       "tables": ["patients", "tokens"]
     }
   ]
