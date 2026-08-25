@@ -1,10 +1,10 @@
 {
   "doctors": [
     {
-      "doctor_id": "dr-prasanna-karthik-s--chn",
-      "phone": "916300769676",
-      "name": "Dr. Prasanna Karthik S",
-      "tables": ["patients", "tokens"]
+      "doctor_id": "dr-ajit-yadav--chn",
+      "phone": "911234567898",
+      "name": "Dr. Ajit Yadav",
+      "tables": ["patients", "tokens", "doctor_sessions"]
     }
   ]
 }

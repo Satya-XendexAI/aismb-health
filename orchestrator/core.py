@@ -1,6 +1,7 @@
 import uuid
 import json
 import logging
+from datetime import date
 from typing import List
 
 from models.session import (
@@ -62,6 +63,11 @@ class WhatsAppOrchestrator:
                     role=ChatRole.TOOL_RESULT,
                     content=json.dumps(result),
                 ))
+                if tool_call.tool_name == "appointment":
+                    formatted = self._format_booking_result(result, tool_call.args)
+                    if formatted:
+                        self._responder(formatted, context)
+                        return
 
             elif _is_negative(wa_message.text):
                 session.pending_tool = None
@@ -87,7 +93,7 @@ class WhatsAppOrchestrator:
         else:
             use_full_tools = session.booking_intent or session.turn_count >= 3
             tool_schemas   = PATIENT_TOOLS if use_full_tools else PATIENT_TOOLS_WARMUP
-            system_prompt  = PATIENT_SYSTEM_PROMPT
+            system_prompt  = PATIENT_SYSTEM_PROMPT + f"\n\nToday's date is {date.today().isoformat()}."
         final_text = self.fallback_text
 
         for _ in range(self.max_iterations):
@@ -126,6 +132,11 @@ class WhatsAppOrchestrator:
                 role=ChatRole.TOOL_RESULT,
                 content=json.dumps(result),
             ))
+            if agent_response.tool_call.tool_name == "appointment":
+                formatted = self._format_booking_result(result, agent_response.tool_call.args)
+                if formatted:
+                    final_text = formatted
+                    break
 
         self._responder(final_text, context)
 
@@ -211,6 +222,40 @@ class WhatsAppOrchestrator:
             desc += f" for {name}"
         desc += f" on {date}"
         return desc
+
+    @staticmethod
+    def _format_booking_result(result: dict, tool_args: dict) -> str | None:
+        if result.get("action") != "BOOK":
+            return None
+        booking = result.get("result", {})
+        if booking.get("status") != "CONFIRMED":
+            return None
+
+        token    = booking.get("token_number", "?")
+        doctor   = booking.get("doctor_name", tool_args.get("doctor_name", "the doctor"))
+        dept     = booking.get("department", "")
+        hospital = booking.get("hospital_name", "")
+        address  = booking.get("hospital_address", "")
+        fee      = booking.get("fee")
+        eta      = booking.get("estimated_time", "")
+        date_str = tool_args.get("date", "today")
+
+        lines = ["✅ *Appointment Confirmed*\n"]
+        lines.append(f"🎫 *Token:* #{token}")
+        lines.append(f"👨‍⚕️ *Doctor:* {doctor}")
+        if dept:
+            lines.append(f"🏛 *Department:* {dept}")
+        if hospital:
+            lines.append(f"🏥 *Hospital:* {hospital}")
+        if address:
+            lines.append(f"📍 *Address:* {address}")
+        lines.append(f"📅 *Date:* {date_str}")
+        if eta and "T" in str(eta):
+            lines.append(f"⏰ *Estimated Time:* {str(eta).split('T')[1][:5]}")
+        if fee:
+            lines.append(f"💰 *Fee:* ₹{int(fee)}")
+
+        return "\n".join(lines)
 
     def _responder(self, text: str, context: OrchestratorContext):
         for chunk in self._chunk(text, max_chars=1000):
