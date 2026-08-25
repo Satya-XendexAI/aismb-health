@@ -178,7 +178,7 @@ class WhatsAppOrchestrator:
 
     def _interrupt(self, tool_call, context: OrchestratorContext):
         desc    = self._describe_tool(tool_call)
-        message = f"Please confirm: {desc}. Reply YES to proceed or NO to cancel."
+        message = f"Please confirm: {desc}"
         context.session.pending_tool = tool_call
         context.session.state        = SessionState.AWAITING_CONFIRM
         self.repository.save_session(context.session)
@@ -187,9 +187,20 @@ class WhatsAppOrchestrator:
         except Exception:
             pass
 
+    @staticmethod
+    def _doctor_display_name(args: dict) -> str:
+        if args.get("doctor_name"):
+            return args["doctor_name"]
+        # Derive readable name from doctor_id e.g. "dr-ajit-yadav--chn" → "Dr. Ajit Yadav"
+        raw = args.get("doctor_id", "the doctor")
+        import re as _re
+        raw = _re.sub(r"--[a-z]+$", "", raw)   # strip --chn suffix
+        raw = _re.sub(r"-[a-z]{2,4}$", "", raw) # strip -chn suffix
+        return raw.replace("-", " ").strip().title()
+
     def _describe_tool(self, tool_call) -> str:
         action = tool_call.args.get("action", "BOOK").upper()
-        doctor = tool_call.args.get("doctor_id", "the doctor")
+        doctor = self._doctor_display_name(tool_call.args)
         dept   = tool_call.args.get("department", "")
         name   = tool_call.args.get("patient_name", "")
         date   = tool_call.args.get("date", "today")
