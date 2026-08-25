@@ -24,6 +24,8 @@ _appointment_schema = {
                                      "description": "Patient's age (optional)"},
                 "patient_location": {"type": "string",
                                      "description": "Patient's city or location (optional)"},
+                "doctor_name":      {"type": "string",
+                                     "description": "Doctor's display name as shown to the patient (optional, used in confirmation message)"},
                 "symptoms":         {"type": "string",
                                      "description": "Patient's symptoms (optional)"},
                 "date":             {"type": "string",

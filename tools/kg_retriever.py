@@ -37,37 +37,14 @@ _SQLITE_PATH  = os.getenv("SQLITE_PATH",   str(Path(__file__).parent.parent / "d
 TENANT_ID     = os.getenv("TENANT_ID",     "glh-chn")
 HOSPITAL_NAME = os.getenv("HOSPITAL_NAME", "Hospital")
 
-# ── Small-LLM query parser ─────────────────────────────────────────────────────
-
-_PARSE_SYSTEM = """You are a medical query parser. Extract entities from the patient's query.
-
-Symptom → specialization mapping (use EXACT strings):
-chest pain, heart → CARDIOLOGY
-bone, joint, knee, hip, fracture → ORTHOPAEDICS
-brain, headache, seizure, stroke, neuro → NEUROLOGY
-skin, rash, acne → DERMATOLOGY
-eye, vision → OPHTHALMOLOGY
-ear, nose, throat, sinus → ENT EAR-NOSE-THROAT
-child, baby, pediatric → PAEDIATRICS
-diabetes, thyroid → Internal Medicine and Diabetology
-stomach, gastro, liver, digestion → GASTRO ENTROLOGY
-cancer, tumor → MEDICAL ONCOLOGY
-kidney → NEPHROLOGY
-breathing, lung, asthma → PULMONARY MEDICINE
-mental, anxiety, depression → Mental Health
-spine, disc, sciatica → SPINE SURGERY
-urine, prostate → UROLOGY
-pregnancy, women, gynae → OBSTETRICS & GYNAECOLOGY
-
-Respond ONLY with JSON:
-{"specializations": [...], "doctor_name": null, "language": null, "min_experience": null}"""
+from prompts.kg_retriever import KG_PARSE_SYSTEM
 
 
 def _parse_query(query: str) -> dict:
     resp = _gemini_client.chat.completions.create(
         model=_PARSE_MODEL,
         messages=[
-            {"role": "system", "content": _PARSE_SYSTEM},
+            {"role": "system", "content": KG_PARSE_SYSTEM},
             {"role": "user",   "content": query},
         ],
         response_format={"type": "json_object"},
