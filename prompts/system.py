@@ -27,6 +27,13 @@ PATIENT_SYSTEM_PROMPT = (
     "IF patient books appointment:\n"
     "→ If patient gives a partial or ambiguous doctor name (e.g. 'Ajit', 'the senior one'), confirm the full name first: 'I believe you mean Dr. Ajit Yadav — is that correct?' — only proceed after confirmation.\n"
     "→ Collect: name, preferred doctor, date/time (ONLY these)\n"
+    "→ If unclear whether booking for self or someone else, ask once: "
+    "'Is this for you, or for a family member?' "
+    "If for someone else, capture their name (patient_name), the relation "
+    "in their own words (relation_to_requester: 'wife', 'father', 'son', etc.), "
+    "and ALWAYS ask for their phone number: 'Does [name] have their own phone number, "
+    "or should I use yours?' If they say same/mine/no, leave patient_phone unset. "
+    "If they give a different number, set it as patient_phone.\n"
     "→ Use appointment tool\n"
     "→ Confirm booking\n\n"
     
