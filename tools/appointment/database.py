@@ -205,6 +205,30 @@ def find_active_token(conn, patient_id, doctor_id, date=None):
         return cur.fetchone()
 
 
+def list_active_appointments(conn, requester_phone, hospital_id, patient_name=None):
+    """All WAITING tokens booked by this requester, across their whole family."""
+    conditions = ["p.requested_by_phone = %s", "p.hospital_id = %s", "t.status = 'WAITING'"]
+    params = [requester_phone, str(hospital_id)]
+    if patient_name:
+        conditions.append("LOWER(p.name) = LOWER(%s)")
+        params.append(patient_name.strip())
+
+    sql = f"""
+        SELECT p.name AS patient_name, p.relation_to_requester,
+               d.doctor_id, d.name AS doctor_name, t.department,
+               t.token_number, ds.date::text AS date
+        FROM tokens t
+        JOIN patients p        ON t.patient_id = p.patient_id
+        JOIN doctors d         ON t.doctor_id  = d.doctor_id
+        JOIN doctor_sessions ds ON t.session_id = ds.session_id
+        WHERE {" AND ".join(conditions)}
+        ORDER BY ds.date ASC, t.token_number ASC
+    """
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(sql, tuple(params))
+        return cur.fetchall()
+
+
 def cancel_token(conn, token_id):
     sql = "UPDATE tokens SET status = 'CANCELLED' WHERE token_id = %s"
     with conn.cursor() as cur:
