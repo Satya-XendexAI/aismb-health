@@ -258,7 +258,7 @@ class WhatsAppOrchestrator:
         if dept:
             lines.append(f"🏛 *Department:* {dept}")
         if hospital:
-            lines.append(f"🏥 *Hospital:* {hospital}")
+            lines.append("🏥 *Hospital:* Hospital name")
         if address:
             lines.append(f"📍 *Address:* {address}")
         lines.append(f"📅 *Date:* {date_str}")
