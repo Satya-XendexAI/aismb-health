@@ -51,27 +51,62 @@ def get_doctor(conn, doctor_id, hospital_id):
         return cur.fetchone()
 
 
-def find_patient(conn, phone, hospital_id):
-    sql = """
-        SELECT patient_id, hospital_id, name, phone, age, location, diagnosis
+def find_family_member(conn, requester_phone, hospital_id, patient_name, relation=None):
+    """Find a patient by requester phone + name (+ optional relation)."""
+    conditions = [
+        "requested_by_phone = %s",
+        "hospital_id = %s",
+        "LOWER(name) = LOWER(%s)",
+    ]
+    params = [requester_phone, str(hospital_id), patient_name.strip()]
+
+    if relation and relation.strip().lower() != "self":
+        conditions.append("LOWER(relation_to_requester) = LOWER(%s)")
+        params.append(relation.strip())
+
+    sql = f"""
+        SELECT patient_id, hospital_id, name, phone, age, location, diagnosis,
+               requested_by_phone, relation_to_requester
         FROM patients
-        WHERE phone = %s
-          AND hospital_id = %s
+        WHERE {" AND ".join(conditions)}
+        ORDER BY updated_at DESC
+        LIMIT 1
     """
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, (phone, str(hospital_id)))
+        cur.execute(sql, tuple(params))
         return cur.fetchone()
 
 
-def insert_patient(conn, hospital_id, name, phone, age, location, diagnosis):
+def insert_family_member(conn, hospital_id, requester_phone, name, phone,
+                         relation, age=None, location=None, diagnosis=None):
+    """Insert a new family member. Uses ON CONFLICT for safe re-delivery."""
     sql = """
-        INSERT INTO patients (hospital_id, name, phone, age, location, diagnosis)
-        VALUES (%s, %s, %s, %s, %s, %s)
-        RETURNING patient_id, hospital_id, name, phone, age, location, diagnosis
+        INSERT INTO patients
+            (hospital_id, name, phone, age, location, diagnosis,
+             requested_by_phone, relation_to_requester)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (hospital_id, requested_by_phone, (LOWER(name))) DO NOTHING
+        RETURNING patient_id, hospital_id, name, phone, age, location, diagnosis,
+                  requested_by_phone, relation_to_requester
     """
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, (str(hospital_id), name, phone, age, location, diagnosis))
-        return cur.fetchone()
+        cur.execute(sql, (
+            str(hospital_id), name.strip(), phone, age, location, diagnosis,
+            requester_phone.strip(), (relation or "self").strip().lower(),
+        ))
+        row = cur.fetchone()
+        if row is None:
+            return find_family_member(conn, requester_phone, hospital_id, name, relation)
+        return row
+
+
+def touch_family_member(conn, patient_id):
+    """Update timestamp so recently-booked members appear first."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE patients SET updated_at = NOW() WHERE patient_id = %s",
+            (str(patient_id),),
+        )
 
 
 def get_or_create_today_session(conn, doctor_id, hospital_id, date=None):
@@ -168,6 +203,30 @@ def find_active_token(conn, patient_id, doctor_id, date=None):
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(sql, params)
         return cur.fetchone()
+
+
+def list_active_appointments(conn, requester_phone, hospital_id, patient_name=None):
+    """All WAITING tokens booked by this requester, across their whole family."""
+    conditions = ["p.requested_by_phone = %s", "p.hospital_id = %s", "t.status = 'WAITING'"]
+    params = [requester_phone, str(hospital_id)]
+    if patient_name:
+        conditions.append("LOWER(p.name) = LOWER(%s)")
+        params.append(patient_name.strip())
+
+    sql = f"""
+        SELECT p.name AS patient_name, p.relation_to_requester,
+               d.doctor_id, d.name AS doctor_name, t.department,
+               t.token_number, ds.date::text AS date
+        FROM tokens t
+        JOIN patients p        ON t.patient_id = p.patient_id
+        JOIN doctors d         ON t.doctor_id  = d.doctor_id
+        JOIN doctor_sessions ds ON t.session_id = ds.session_id
+        WHERE {" AND ".join(conditions)}
+        ORDER BY ds.date ASC, t.token_number ASC
+    """
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(sql, tuple(params))
+        return cur.fetchall()
 
 
 def cancel_token(conn, token_id):

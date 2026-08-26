@@ -62,6 +62,7 @@ class WhatsAppOrchestrator:
                 session.history.append(ChatTurn(
                     role=ChatRole.TOOL_RESULT,
                     content=json.dumps(result),
+                    tool_call=tool_call,              # carry tool_call so llm.py can always resolve name/id
                 ))
                 if tool_call.tool_name == "appointment":
                     formatted = self._format_booking_result(result, tool_call.args)
@@ -168,10 +169,19 @@ class WhatsAppOrchestrator:
             from tools.appointment import handle_request
             payload = {
                 **tool_call.args,
-                "hospital_id":   context.wa_message.hospital_id,
-                "patient_phone": context.wa_message.from_number,
+                "hospital_id":      context.wa_message.hospital_id,
+                "requester_phone":  context.wa_message.from_number,
+                "patient_phone":    tool_call.args.get("patient_phone")
+                                    or context.wa_message.from_number,
             }
             return handle_request(payload)
+        elif tool_call.tool_name == "list_appointments":
+            from tools.appointment import list_appointments
+            return list_appointments(
+                hospital_id=context.wa_message.hospital_id,
+                requester_phone=context.wa_message.from_number,
+                patient_name=tool_call.args.get("patient_name"),
+            )
         elif tool_call.tool_name == "kg_retriever":
             from tools.kg_retriever import retrieve_context
             return retrieve_context(**tool_call.args)
@@ -210,16 +220,18 @@ class WhatsAppOrchestrator:
         return raw.replace("-", " ").strip().title()
 
     def _describe_tool(self, tool_call) -> str:
-        action = tool_call.args.get("action", "BOOK").upper()
-        doctor = self._doctor_display_name(tool_call.args)
-        dept   = tool_call.args.get("department", "")
-        name   = tool_call.args.get("patient_name", "")
-        date   = tool_call.args.get("date", "today")
-        desc   = f"{action} appointment with {doctor}"
+        action   = tool_call.args.get("action", "BOOK").upper()
+        doctor   = self._doctor_display_name(tool_call.args)
+        dept     = tool_call.args.get("department", "")
+        name     = tool_call.args.get("patient_name", "")
+        relation = tool_call.args.get("relation_to_requester", "self")
+        date     = tool_call.args.get("date", "today")
+        desc     = f"{action} appointment with {doctor}"
         if dept:
             desc += f" ({dept})"
         if name:
-            desc += f" for {name}"
+            suffix = f" ({relation})" if relation and relation != "self" else ""
+            desc += f" for {name}{suffix}"
         desc += f" on {date}"
         return desc
 

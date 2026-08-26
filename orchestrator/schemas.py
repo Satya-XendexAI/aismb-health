@@ -30,8 +30,33 @@ _appointment_schema = {
                                      "description": "Patient's symptoms (optional)"},
                 "date":             {"type": "string",
                                      "description": "Appointment date in YYYY-MM-DD format (optional, defaults to today)"},
+                "relation_to_requester": {"type": "string",
+                                     "description": "Who is this for? 'self' if for the patient themselves, otherwise their relation e.g. 'wife', 'father', 'son'. Default: 'self'."},
+                "patient_phone":    {"type": "string",
+                                     "description": "Only if the family member has their own separate phone number. Omit if same as the WhatsApp sender's number."},
             },
             "required": ["action", "doctor_id", "department", "patient_name"],
+        },
+    },
+}
+
+_list_appointments_schema = {
+    "type": "function",
+    "function": {
+        "name": "list_appointments",
+        "description": (
+            "List the patient's active/upcoming bookings (across their whole family, "
+            "since one WhatsApp number can book for several people). Use this whenever "
+            "asked 'what are my appointments' — also use it BEFORE a cancel request, to "
+            "find the doctor_id yourself instead of asking the patient to recall it."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "patient_name": {"type": "string",
+                    "description": "Optional — only set this to filter to one specific family member, e.g. 'just my wife's appointment'."},
+            },
+            "required": [],
         },
     },
 }
@@ -69,12 +94,13 @@ _query_data_schema = {
     },
 }
 
-PATIENT_TOOLS        = [_appointment_schema, _kg_retriever_schema]
-PATIENT_TOOLS_WARMUP = [_kg_retriever_schema]   # appointment stripped for conversational warmup turns
+PATIENT_TOOLS        = [_appointment_schema, _list_appointments_schema, _kg_retriever_schema]
+PATIENT_TOOLS_WARMUP = [_list_appointments_schema, _kg_retriever_schema]   # appointment stripped, listing isn't
 DOCTOR_TOOLS         = [_kg_retriever_schema, _query_data_schema]
 
 ROLE_PERMISSIONS = {
-    "appointment":  {Role.PATIENT},
-    "query_data":   {Role.DOCTOR},
-    "kg_retriever": {Role.PATIENT, Role.DOCTOR},
+    "appointment":       {Role.PATIENT},
+    "list_appointments": {Role.PATIENT},
+    "query_data":        {Role.DOCTOR},
+    "kg_retriever":       {Role.PATIENT, Role.DOCTOR},
 }

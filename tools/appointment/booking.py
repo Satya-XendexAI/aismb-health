@@ -32,6 +32,7 @@ def calculate_eta(session, doctor, patients_ahead):
 
 
 def book(conn, payload):
+    # Validate hospital
     hospital = db.get_hospital(conn, payload.hospital_id)
     if not hospital:
         return ErrorResult(status="ERROR", error_code="HOSPITAL_NOT_FOUND",
@@ -40,34 +41,46 @@ def book(conn, payload):
     if mode_error:
         return mode_error
 
+    # Validate doctor
     doctor = db.get_doctor(conn, payload.doctor_id, payload.hospital_id)
     if not doctor:
         return ErrorResult(status="ERROR", error_code="DOCTOR_NOT_FOUND",
                            message=f"Doctor {payload.doctor_id} not found or inactive.")
 
-    patient = db.find_patient(conn, payload.patient_phone, payload.hospital_id)
+    # Find or create patient (family-aware)
+    patient = db.find_family_member(
+        conn, payload.requester_phone, payload.hospital_id,
+        payload.patient_name, payload.relation_to_requester,
+    )
     if not patient:
-        patient = db.insert_patient(
+        patient = db.insert_family_member(
             conn,
             hospital_id=payload.hospital_id,
+            requester_phone=payload.requester_phone,
             name=payload.patient_name,
-            phone=payload.patient_phone,
+            phone=payload.patient_phone or payload.requester_phone,
+            relation=payload.relation_to_requester,
             age=payload.patient_age,
             location=payload.patient_location,
             diagnosis=payload.symptoms,
         )
 
+    # Get or create today's session
     session = db.get_or_create_today_session(
         conn, payload.doctor_id, payload.hospital_id, payload.date
     )
 
+    # Check for duplicate booking
     existing_token = db.find_active_token(
         conn, patient["patient_id"], payload.doctor_id, payload.date
     )
     if existing_token:
-        return ErrorResult(status="ERROR", error_code="DUPLICATE_BOOKING",
-                           message=f"You already have token #{existing_token['token_number']} with this doctor.")
+        return ErrorResult(
+            status="ERROR", error_code="DUPLICATE_BOOKING",
+            message=f"{patient['name']} already has token #{existing_token['token_number']} with this doctor.",
+        )
 
+    # Create token
     token = db.insert_token(
         conn,
         session_id=session["session_id"],
@@ -77,12 +90,18 @@ def book(conn, payload):
         department=payload.department,
     )
 
+    # Mark patient as recently used
+    db.touch_family_member(conn, patient["patient_id"])
+
+    # Calculate ETA
     patients_ahead = db.count_patients_ahead(conn, session["session_id"], token["token_number"])
     estimated_time = calculate_eta(session, doctor, patients_ahead)
 
     return BookingConfirmation(
         status="CONFIRMED",
         token_number=token["token_number"],
+        patient_name=patient["name"],
+        relation_to_requester=patient["relation_to_requester"],
         doctor_name=doctor["name"],
         department=payload.department,
         hospital_name=hospital["name"],
@@ -101,16 +120,25 @@ def cancel(conn, payload):
     if mode_error:
         return mode_error
 
-    patient = db.find_patient(conn, payload.patient_phone, payload.hospital_id)
+    # Find specific family member
+    patient = db.find_family_member(
+        conn, payload.requester_phone, payload.hospital_id,
+        payload.patient_name, payload.relation_to_requester,
+    )
     if not patient:
-        return CancellationResult(status="PATIENT_NOT_FOUND",
-                                  message="No patient record found for this number.")
+        return CancellationResult(
+            status="PATIENT_NOT_FOUND",
+            message=f"No record found for '{payload.patient_name}'.",
+        )
 
     active = db.find_active_token(conn, patient["patient_id"], payload.doctor_id, payload.date)
     if not active:
         return CancellationResult(status="NO_ACTIVE_BOOKING",
-                                  message="No active booking found to cancel.")
+                                  message=f"No active booking found for {patient['name']}.")
 
     db.cancel_token(conn, active["token_id"])
-    return CancellationResult(status="CANCELLED",
-                              message=f"Your token #{active['token_number']} has been cancelled.")
+    return CancellationResult(
+        status="CANCELLED",
+        message=f"Token #{active['token_number']} for {patient['name']} has been cancelled.",
+        cancelled_for=patient["name"],
+    )
