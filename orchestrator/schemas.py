@@ -76,6 +76,24 @@ _kg_retriever_schema = {
     },
 }
 
+_memory_tool_schema = {
+    "type": "function",
+    "function": {
+        "name": "memory_tool",
+        "description": (
+            "Fetch the patient's own profile, registered family members, and their "
+            "recent or active appointments from the database. Call this when you need "
+            "to know the patient's name, age, location, or family member details that "
+            "weren't already given in the session context."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+}
+
 _query_data_schema = {
     "type": "function",
     "function": {
@@ -94,13 +112,14 @@ _query_data_schema = {
     },
 }
 
-PATIENT_TOOLS        = [_appointment_schema, _list_appointments_schema, _kg_retriever_schema]
-PATIENT_TOOLS_WARMUP = [_list_appointments_schema, _kg_retriever_schema]   # appointment stripped, listing isn't
+PATIENT_TOOLS        = [_appointment_schema, _list_appointments_schema, _kg_retriever_schema, _memory_tool_schema]
+PATIENT_TOOLS_WARMUP = [_list_appointments_schema, _kg_retriever_schema, _memory_tool_schema]
 DOCTOR_TOOLS         = [_kg_retriever_schema, _query_data_schema]
 
 ROLE_PERMISSIONS = {
     "appointment":       {Role.PATIENT},
     "list_appointments": {Role.PATIENT},
+    "memory_tool":       {Role.PATIENT},
     "query_data":        {Role.DOCTOR},
-    "kg_retriever":       {Role.PATIENT, Role.DOCTOR},
+    "kg_retriever":      {Role.PATIENT, Role.DOCTOR},
 }
