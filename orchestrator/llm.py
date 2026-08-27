@@ -96,13 +96,16 @@ class GeminiLLMAdapter:
                     tool_name   = turn.tool_call.tool_name
                 else:
                     # Fallback: search backwards for the matching ASSISTANT tool call
-                    tool_use_id = "unknown"
-                    tool_name   = "unknown"
+                    tool_use_id = None
+                    tool_name   = None
                     for prev_turn in reversed(history[:i]):
                         if prev_turn.role == ChatRole.ASSISTANT and prev_turn.tool_call:
                             tool_use_id = prev_turn.tool_call.tool_use_id
                             tool_name   = prev_turn.tool_call.tool_name
                             break
+                # Gemini rejects empty tool name — skip the turn to avoid a 400 error
+                if not tool_name or not tool_use_id:
+                    continue
                 messages.append({
                     "role":         "tool",
                     "tool_call_id": tool_use_id,

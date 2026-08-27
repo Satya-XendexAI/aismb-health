@@ -352,9 +352,13 @@ def _fuse_results(vector_results: list[dict], graph_results: list[dict], n: int 
 
 # ── Context builder ────────────────────────────────────────────────────────────
 
-def _build_context(fused: list[dict]) -> str:
+def _build_context(fused: list[dict]) -> str | dict:
     if not fused:
-        return f"No matching doctors found in {HOSPITAL_NAME}."
+        return {
+            "context_text": f"No matching doctors found in {HOSPITAL_NAME} for this specialty.",
+            "doctors": [],
+            "found": False,
+        }
     lines = [f"RELEVANT DOCTORS FROM {HOSPITAL_NAME.upper()}:\n"]
     for i, doc in enumerate(fused, 1):
         name  = doc.get("name", "Unknown")
@@ -487,6 +491,9 @@ def retrieve_context(query: str) -> dict:
             d["next_slot"] = slot_map[key]
 
     context_text = _build_context(fused)
+
+    if isinstance(context_text, dict):
+        return context_text
 
     return {
         "context_text": context_text,

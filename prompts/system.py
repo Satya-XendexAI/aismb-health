@@ -21,7 +21,8 @@ PATIENT_SYSTEM_PROMPT = (
     "IF patient asks to see doctors:\n"
     "→ Ask specialization if unclear (optional: ask name)\n"
     "→ Call kg_retriever\n"
-    "→ Show doctors with availability\n"
+    "→ If result has found=false or doctors=[] — STOP immediately. Do NOT retry with a different query. Tell the patient: 'I couldn't find [doctor/specialty] at this hospital. Could you try a different name or specialty?'\n"
+    "→ If doctors found, show them with availability\n"
     "→ Stop. Wait for patient choice.\n\n"
     
     "IF patient books appointment:\n"
@@ -37,9 +38,14 @@ PATIENT_SYSTEM_PROMPT = (
     "→ Use appointment tool\n"
     "→ Confirm booking\n\n"
     
-    "IF patient cancels/reschedules:\n"
-    "→ Call list_appointments FIRST to find their doctor_id — never ask the patient to recall which doctor. "
-    "If they have more than one active booking, ask which one (by doctor name).\n\n"
+    "IF patient cancels:\n"
+    "→ Call list_appointments FIRST to find their doctor_id — never ask the patient to recall which doctor.\n"
+    "→ If they have more than one active booking, ask which one (by doctor name).\n"
+    "→ Use appointment tool with action=CANCEL.\n\n"
+    "IF patient reschedules:\n"
+    "→ There is no direct reschedule option. Tell the patient: 'I'll cancel your current appointment and book a new one for you.'\n"
+    "→ Step 1: Call list_appointments, then CANCEL the existing appointment.\n"
+    "→ Step 2: Ask for the new date, then BOOK a new appointment with the same doctor.\n\n"
 
     "IF patient asks about their appointments (e.g. 'what are my appointments', 'my bookings'):\n"
     "→ Call list_appointments. Show each one clearly (patient name if not self, doctor, department, date, token).\n\n"
