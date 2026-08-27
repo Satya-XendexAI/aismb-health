@@ -53,7 +53,7 @@ stages:
       - job: BuildImage
         displayName: Build image in ACR
         pool:
-          name: default
+          vmImage: ubuntu-latest
         steps:
           - task: AzureCLI@2
             displayName: 'Build & push image to ACR'
@@ -75,7 +75,7 @@ stages:
       - job: Deploy
         displayName: Create namespace, secret and apply manifests
         pool:
-          name: default
+          vmImage: ubuntu-latest
         steps:
           - task: CopyFiles@2
             displayName: 'Copy Kubernetes Manifests'
