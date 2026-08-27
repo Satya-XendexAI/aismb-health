@@ -1,0 +1,196 @@
+# =============================================================================
+# Azure DevOps pipeline for aismb-health
+# Mirrors the reference pipeline structure (namespace + secrets + kubectl apply)
+# but builds the image in ACR first, then deploys the two apps:
+#   - aismb-whatsapp  (whatsapp.py,        port 8000)
+#   - aismb-interface (interface/app.py,   port 8001)
+#
+# SETUP:
+#   1) Create an Azure Resource Manager service connection (azureSubscription).
+#   2) Create an ACR and note its login server + short name.
+#   3) Define the secret pipeline variables below (marked <<SECRET>>) as
+#      "secret" variables so they are not logged.
+# =============================================================================
+trigger:
+  - main
+
+variables:
+  tag: 'latest'
+  acrLoginServer: 'hsptlagnrgstry.azurecr.io'   # <-- your ACR login server
+  acrName: 'hsptlagnrgstry'                     # <-- ACR short name (no .azurecr.io)
+  imageName: 'aismb-health'
+  k8sNamespace: 'aismb-health'
+  azureSubscription: 'kubernetes-service-connection'
+  aksResourceGroup: 'rg-hospital-nprd-app'
+  aksName: 'hspt-dmn-agent-cluster'
+
+  # --- Secret pipeline variables (set these as SECRET vars in the UI) --------
+  # These mirror ONLY the active (non-commented) keys in .env.
+  GEMINI_API_KEY: ''          # <<SECRET>>
+  GEMINI_TEMPERATURE: '0.3'
+  NEO4J_URI: ''               # <<SECRET>>
+  NEO4J_USERNAME: ''          # <<SECRET>>
+  NEO4J_PASSWORD: ''          # <<SECRET>>
+  NEO4J_DATABASE: ''          # <<SECRET>>
+  AURA_INSTANCEID: ''         # <<SECRET>>
+  AURA_INSTANCENAME: ''       # <<SECRET>>
+  DB_HOST: ''                 # <<SECRET>>
+  DB_PORT: '5432'
+  DB_NAME: 'postgres'
+  DB_USER: ''                 # <<SECRET>>
+  DB_PASSWORD: ''             # <<SECRET>>
+  PHONE_NUMBER_ID: ''         # <<SECRET>>
+  WABA_ID: ''                 # <<SECRET>>
+  ACCESS_TOKEN: ''            # <<SECRET>>
+  VERIFY_TOKEN: ''            # <<SECRET>>
+  WEBHOOK_SECRET: ''          # <<SECRET>>
+  # ---------------------------------------------------------------------------
+
+stages:
+  - stage: Build
+    displayName: Build and Push Image
+    jobs:
+      - job: BuildImage
+        displayName: Build image in ACR
+        pool:
+          name: default
+        steps:
+          - task: AzureCLI@2
+            displayName: 'Build & push image to ACR'
+            inputs:
+              azureSubscription: '$(azureSubscription)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az acr build \
+                  --registry $(acrName) \
+                  --image $(imageName):$(tag) \
+                  --file deploy/Dockerfile \
+                  .
+
+  - stage: Deploy
+    displayName: Deploy to AKS
+    dependsOn: Build
+    jobs:
+      - job: Deploy
+        displayName: Create namespace, secret and apply manifests
+        pool:
+          name: default
+        steps:
+          - task: CopyFiles@2
+            displayName: 'Copy Kubernetes Manifests'
+            inputs:
+              SourceFolder: '$(System.DefaultWorkingDirectory)/k8s'
+              Contents: '*.yaml'
+              TargetFolder: '$(Build.ArtifactStagingDirectory)/manifests'
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publish Manifests'
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+              ArtifactName: 'manifests'
+              publishLocation: 'Container'
+
+          - task: DownloadPipelineArtifact@2
+            displayName: 'Download Manifests'
+            inputs:
+              buildType: 'current'
+              artifactName: 'manifests'
+              itemPattern: '**/*.yaml'
+              targetPath: '$(System.ArtifactsDirectory)/manifests'
+
+          - task: AzureCLI@2
+            displayName: 'Create namespace and secret'
+            inputs:
+              azureSubscription: '$(azureSubscription)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az aks command invoke \
+                  --resource-group $(aksResourceGroup) \
+                  --name $(aksName) \
+                  --command "kubectl create namespace $(k8sNamespace) --dry-run=client -o yaml | kubectl apply -f -"
+
+                az aks command invoke \
+                  --resource-group $(aksResourceGroup) \
+                  --name $(aksName) \
+                  --command "kubectl create secret generic aismb-secrets -n $(k8sNamespace) \
+                    --from-literal=GEMINI_API_KEY='$GEMINI_API_KEY' \
+                    --from-literal=GEMINI_TEMPERATURE='$GEMINI_TEMPERATURE' \
+                    --from-literal=NEO4J_URI='$NEO4J_URI' \
+                    --from-literal=NEO4J_USERNAME='$NEO4J_USERNAME' \
+                    --from-literal=NEO4J_PASSWORD='$NEO4J_PASSWORD' \
+                    --from-literal=NEO4J_DATABASE='$NEO4J_DATABASE' \
+                    --from-literal=AURA_INSTANCEID='$AURA_INSTANCEID' \
+                    --from-literal=AURA_INSTANCENAME='$AURA_INSTANCENAME' \
+                    --from-literal=DB_HOST='$DB_HOST' \
+                    --from-literal=DB_PORT='$DB_PORT' \
+                    --from-literal=DB_NAME='$DB_NAME' \
+                    --from-literal=DB_USER='$DB_USER' \
+                    --from-literal=DB_PASSWORD='$DB_PASSWORD' \
+                    --from-literal=PHONE_NUMBER_ID='$PHONE_NUMBER_ID' \
+                    --from-literal=WABA_ID='$WABA_ID' \
+                    --from-literal=ACCESS_TOKEN='$ACCESS_TOKEN' \
+                    --from-literal=VERIFY_TOKEN='$VERIFY_TOKEN' \
+                    --from-literal=WEBHOOK_SECRET='$WEBHOOK_SECRET' \
+                    --dry-run=client -o yaml | kubectl apply -f -"
+            env:
+              GEMINI_API_KEY: $(GEMINI_API_KEY)
+              GEMINI_TEMPERATURE: $(GEMINI_TEMPERATURE)
+              NEO4J_URI: $(NEO4J_URI)
+              NEO4J_USERNAME: $(NEO4J_USERNAME)
+              NEO4J_PASSWORD: $(NEO4J_PASSWORD)
+              NEO4J_DATABASE: $(NEO4J_DATABASE)
+              AURA_INSTANCEID: $(AURA_INSTANCEID)
+              AURA_INSTANCENAME: $(AURA_INSTANCENAME)
+              DB_HOST: $(DB_HOST)
+              DB_PORT: $(DB_PORT)
+              DB_NAME: $(DB_NAME)
+              DB_USER: $(DB_USER)
+              DB_PASSWORD: $(DB_PASSWORD)
+              PHONE_NUMBER_ID: $(PHONE_NUMBER_ID)
+              WABA_ID: $(WABA_ID)
+              ACCESS_TOKEN: $(ACCESS_TOKEN)
+              VERIFY_TOKEN: $(VERIFY_TOKEN)
+              WEBHOOK_SECRET: $(WEBHOOK_SECRET)
+
+          - task: AzureCLI@2
+            displayName: 'Attach ACR to AKS (idempotent)'
+            inputs:
+              azureSubscription: '$(azureSubscription)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az aks update \
+                  --resource-group $(aksResourceGroup) \
+                  --name $(aksName) \
+                  --attach-acr $(acrName)
+
+          - task: AzureCLI@2
+            displayName: 'Get AKS credentials and deploy'
+            inputs:
+              azureSubscription: '$(azureSubscription)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                az aks get-credentials --resource-group $(aksResourceGroup) --name $(aksName) --overwrite-existing
+
+                # Point manifests at the real ACR login server.
+                sed -i "s|myacr.azurecr.io|$(acrLoginServer)|g" $(System.ArtifactsDirectory)/manifests/*.yaml
+
+                kubectl apply -f $(System.ArtifactsDirectory)/manifests/namespace.yaml
+                kubectl apply -f $(System.ArtifactsDirectory)/manifests/secret.yaml
+                kubectl apply -f $(System.ArtifactsDirectory)/manifests/whatsapp-deployment.yaml
+                kubectl apply -f $(System.ArtifactsDirectory)/manifests/whatsapp-service.yaml
+                kubectl apply -f $(System.ArtifactsDirectory)/manifests/interface-deployment.yaml
+                kubectl apply -f $(System.ArtifactsDirectory)/manifests/interface-service.yaml
+
+          - task: AzureCLI@2
+            displayName: 'Show service endpoints'
+            inputs:
+              azureSubscription: '$(azureSubscription)'
+              scriptType: 'bash'
+              scriptLocation: 'inlineScript'
+              inlineScript: |
+                kubectl get svc -n $(k8sNamespace)
+                echo "If EXTERNAL-IP is <pending>, wait and re-run: kubectl get svc -n $(k8sNamespace)"

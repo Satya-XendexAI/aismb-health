@@ -1,0 +1,53 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aismb-whatsapp
+  namespace: aismb-health
+  labels:
+    app: aismb-whatsapp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: aismb-whatsapp
+  template:
+    metadata:
+      labels:
+        app: aismb-whatsapp
+    spec:
+      containers:
+        - name: aismb-whatsapp
+          image: hsptlagnrgstry.azurecr.io/aismb-health:latest
+          command: ["python", "-m", "uvicorn", "whatsapp:app", "--host", "0.0.0.0", "--port", "8000"]
+          ports:
+            - name: http
+              containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: aismb-secrets
+          env:
+            - name: PORT
+              value: "8000"
+          resources:
+            requests:
+              cpu: 250m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          startupProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            tcpSocket:
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 15
