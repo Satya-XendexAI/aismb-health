@@ -30,7 +30,7 @@ class GeminiLLMAdapter:
             messages=messages,
             tools=tool_schemas,
             tool_choice="auto",
-            temperature=float(os.getenv("GEMINI_TEMPERATURE", "1.0")),
+            temperature=float(os.getenv("GEMINI_TEMPERATURE", "0.3")),
             max_tokens=8192,
             stream=False,
         )

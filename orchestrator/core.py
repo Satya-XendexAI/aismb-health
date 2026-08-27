@@ -175,6 +175,13 @@ class WhatsAppOrchestrator:
                                     or context.wa_message.from_number,
             }
             return handle_request(payload)
+        elif tool_call.tool_name == "list_appointments":
+            from tools.appointment import list_appointments
+            return list_appointments(
+                hospital_id=context.wa_message.hospital_id,
+                requester_phone=context.wa_message.from_number,
+                patient_name=tool_call.args.get("patient_name"),
+            )
         elif tool_call.tool_name == "kg_retriever":
             from tools.kg_retriever import retrieve_context
             return retrieve_context(**tool_call.args)
@@ -251,7 +258,7 @@ class WhatsAppOrchestrator:
         if dept:
             lines.append(f"🏛 *Department:* {dept}")
         if hospital:
-            lines.append(f"🏥 *Hospital:* {hospital}")
+            lines.append("🏥 *Hospital:* Hospital name")
         if address:
             lines.append(f"📍 *Address:* {address}")
         lines.append(f"📅 *Date:* {date_str}")

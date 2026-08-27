@@ -26,7 +26,7 @@ from interface.notifier import CaptureNotifier
 # The number this interface pretends t===========================+o be. Any value works for patient
 # testing. To test the doctor flow, use the exact phone value (digits
 # only, e.g. "916300769676") from config/doctors.json.
-PATIENT_NUMBER = "911234567461"
+PATIENT_NUMBER = "911234567520"
 
 HOSPITAL_ID = "glngs-chn"
 STATIC_DIR  = Path(__file__).parent / "static"
