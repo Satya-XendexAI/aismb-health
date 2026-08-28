@@ -60,6 +60,7 @@ class GeminiLLMAdapter:
 
     def _build_messages(self, history: List[ChatTurn]) -> list:
         messages = []
+        pending_call_ids: set = set()  # ids of function_calls emitted so far with no result yet
         for i, turn in enumerate(history):
             if turn.role == ChatRole.USER:
                 if messages and messages[-1]["role"] == "user":
@@ -86,6 +87,7 @@ class GeminiLLMAdapter:
                         "content":    None,
                         "tool_calls": [tc_entry],
                     })
+                    pending_call_ids.add(turn.tool_call.tool_use_id)
                 else:
                     messages.append({"role": "assistant", "content": turn.content or " "})
 
@@ -103,9 +105,13 @@ class GeminiLLMAdapter:
                             tool_use_id = prev_turn.tool_call.tool_use_id
                             tool_name   = prev_turn.tool_call.tool_name
                             break
-                # Gemini rejects empty tool name — skip the turn to avoid a 400 error
-                if not tool_name or not tool_use_id:
+                # Safety net: Gemini rejects a tool result with no matching function_call
+                # earlier in the SAME request (e.g. history was trimmed mid-pair). Drop it
+                # rather than send something guaranteed to be rejected.
+                if not tool_use_id or not tool_name or tool_use_id not in pending_call_ids:
                     continue
+
+                pending_call_ids.discard(tool_use_id)
                 messages.append({
                     "role":         "tool",
                     "tool_call_id": tool_use_id,

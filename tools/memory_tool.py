@@ -82,6 +82,7 @@ def _build_output(rows: list[dict]) -> dict:
                 "relation": relation,
                 "name":     name,
                 "age":      r["age"],
+                "location": r["location"],
                 "phone":    r["patient_phone"],
             }
             seen_members[key] = member
@@ -128,12 +129,13 @@ def _format_context(data: dict) -> str:
     if data["family"]:
         members = []
         for m in data["family"]:
-            detail = f"{m['relation']}={m['name']}"
-            if m.get("age"):
-                detail += f"({m['age']}"
-                detail += f", {m['phone']}" if m.get("phone") else ", no phone"
-                detail += ")"
-            members.append(detail)
+            parts = []
+            if m.get("age") is not None:
+                parts.append(str(m["age"]))
+            if m.get("location"):
+                parts.append(m["location"])
+            parts.append(m["phone"] if m.get("phone") else "no phone")
+            members.append(f"{m['relation']}={m['name']}({', '.join(parts)})")
         lines.append(f"• Family: {', '.join(members)}")
 
     if data["active_appointments"]:

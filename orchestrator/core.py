@@ -1,7 +1,7 @@
 import uuid
 import json
 import logging
-from datetime import date
+from datetime import date, datetime
 from typing import List
 
 from models.session import (
@@ -28,6 +28,17 @@ def _is_affirmative(text: str) -> bool:
 def _is_negative(text: str) -> bool:
     lowered = text.strip().lower()
     return lowered in _NEGATIVE or any(kw in lowered for kw in {"no", "cancel", "stop", "don't"})
+
+def _is_valid_phone(phone: str) -> bool:
+    return phone.isdigit() and len(phone) == 10
+
+def _missing_booking_fields(args: dict) -> list[str]:
+    missing = []
+    if args.get("patient_age") is None:
+        missing.append("age")
+    if not args.get("patient_location"):
+        missing.append("location")
+    return missing
 
 
 class WhatsAppOrchestrator:
@@ -115,6 +126,19 @@ class WhatsAppOrchestrator:
             system_prompt = PATIENT_SYSTEM_PROMPT + f"\n\nToday's date is {date.today().isoformat()}."
             if session.memory_context:
                 system_prompt += f"\n\nPATIENT CONTEXT (from DB):\n{session.memory_context}"
+            if session.turn_count == 1:
+                system_prompt += (
+                    "\n\nThis is the first message of a brand-new conversation. Begin your "
+                    "reply with a short self-introduction (e.g. 'Hello! I am Your MediNexus "
+                    "Healthcare Assistant.'), combined with their name from PATIENT CONTEXT "
+                    "if known, then address their request — whether it's a booking, a "
+                    "symptom, or a direct question like 'what are my appointments'."
+                )
+            else:
+                system_prompt += (
+                    "\n\nYou already introduced yourself as Your MediNexus Healthcare "
+                    "Assistant earlier in this conversation. Do NOT reintroduce yourself again."
+                )
         final_text = self.fallback_text
 
         kg_empty_streak = 0
@@ -138,6 +162,28 @@ class WhatsAppOrchestrator:
                 tool_call=agent_response.tool_call,
             ))
 
+            if agent_response.tool_call.tool_name == "appointment":
+                args = agent_response.tool_call.args
+
+                phone = args.get("patient_phone")
+                if phone and not _is_valid_phone(phone):
+                    self._responder(
+                        "That doesn't look like a valid mobile number. Please share a "
+                        "valid 10-digit mobile number, or let me know to use your own.",
+                        context,
+                    )
+                    return
+
+                if args.get("action") == "BOOK":
+                    missing = _missing_booking_fields(args)
+                    if missing:
+                        self._responder(
+                            f"To complete the booking, could you also share the patient's "
+                            f"{' and '.join(missing)}?",
+                            context,
+                        )
+                        return
+
             gate_result = self._gate(agent_response.tool_call, context)
 
             if gate_result.status == GateStatus.FORBIDDEN:
@@ -154,7 +200,7 @@ class WhatsAppOrchestrator:
             session.history.append(ChatTurn(
                 role=ChatRole.TOOL_RESULT,
                 content=json.dumps(result),
-                tool_call=agent_response.tool_call,
+                tool_call=agent_response.tool_call,  # carry tool_call so llm.py can always resolve name/id
             ))
 
             if agent_response.tool_call.tool_name == "kg_retriever":
@@ -254,6 +300,8 @@ class WhatsAppOrchestrator:
     def _interrupt(self, tool_call, context: OrchestratorContext):
         desc    = self._describe_tool(tool_call)
         message = f"Please confirm: {desc}"
+        if context.session.turn_count == 1:
+            message = f"Hello! I am Your MediNexus Healthcare Assistant. {message}"
         context.session.pending_tool = tool_call
         context.session.state        = SessionState.AWAITING_CONFIRM
         self.repository.save_session(context.session)
@@ -312,12 +360,16 @@ class WhatsAppOrchestrator:
         if dept:
             lines.append(f"🏛 *Department:* {dept}")
         if hospital:
-            lines.append("🏥 *Hospital:* Hospital name")
+            lines.append("🏥 *Hospital:* Chaitanya Multispeciality Hospital")
         if address:
-            lines.append(f"📍 *Address:* {address}")
+            lines.append("📍 *Address:* LB Nagar, Hyderabad")
         lines.append(f"📅 *Date:* {date_str}")
         if eta and "T" in str(eta):
-            lines.append(f"⏰ *Estimated Time:* {str(eta).split('T')[1][:5]}")
+            try:
+                eta_time = datetime.fromisoformat(str(eta)).strftime("%I:%M %p").lstrip("0")
+            except ValueError:
+                eta_time = str(eta).split("T")[1][:5]
+            lines.append(f"⏰ *Estimated Reporting Time:* {eta_time}")
         if fee:
             lines.append(f"💰 *Fee:* ₹{int(fee)}")
 
