@@ -155,18 +155,6 @@ stages:
               WEBHOOK_SECRET: $(WEBHOOK_SECRET)
 
           - task: AzureCLI@2
-            displayName: 'Attach ACR to AKS (idempotent)'
-            inputs:
-              azureSubscription: '$(azureSubscription)'
-              scriptType: 'bash'
-              scriptLocation: 'inlineScript'
-              inlineScript: |
-                az aks update \
-                  --resource-group $(aksResourceGroup) \
-                  --name $(aksName) \
-                  --attach-acr $(acrName)
-
-          - task: AzureCLI@2
             displayName: 'Get AKS credentials and deploy'
             inputs:
               azureSubscription: '$(azureSubscription)'
