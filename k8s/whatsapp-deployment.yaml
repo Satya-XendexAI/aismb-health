@@ -6,7 +6,7 @@ metadata:
   labels:
     app: aismb-whatsapp
 spec:
-  replicas: 2
+  replicas: 1
   selector:
     matchLabels:
       app: aismb-whatsapp
@@ -17,20 +17,13 @@ spec:
     spec:
       affinity:
         podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                labelSelector:
-                  matchLabels:
-                    app: aismb-whatsapp
-                topologyKey: kubernetes.io/hostname
-      topologySpreadConstraints:
-        - maxSkew: 1
-          topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: ScheduleAnyway
-          labelSelector:
-            matchLabels:
-              app: aismb-whatsapp
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: aismb-interface
+              topologyKey: kubernetes.io/hostname
+      nodeSelector:
+        kubernetes.azure.com/agentpool: agentpool
       containers:
         - name: aismb-whatsapp
           image: hsptlagnrgstry.azurecr.io/aismb-health:latest
@@ -46,11 +39,11 @@ spec:
               value: "8000"
           resources:
             requests:
-              cpu: 250m
-              memory: 256Mi
+              cpu: 1500m
+              memory: 4Gi
             limits:
-              cpu: 500m
-              memory: 1Gi
+              cpu: "3"
+              memory: 10Gi
           startupProbe:
             tcpSocket:
               port: 8000
