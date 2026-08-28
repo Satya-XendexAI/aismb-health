@@ -52,7 +52,21 @@ class WhatsAppOrchestrator:
         session = context.session
 
         if session.state == SessionState.AWAITING_CONFIRM:
-            if _is_affirmative(wa_message.text):
+            pending = session.pending_tool
+            is_cancel_action = (
+                pending and
+                pending.tool_name == "appointment" and
+                pending.args.get("action") == "CANCEL"
+            )
+            # When confirming a CANCEL appointment, "cancel" means YES — not abort
+            text_is_affirmative = _is_affirmative(wa_message.text) or (
+                is_cancel_action and "cancel" in wa_message.text.strip().lower()
+            )
+            text_is_negative = _is_negative(wa_message.text) and not (
+                is_cancel_action and "cancel" in wa_message.text.strip().lower()
+            )
+
+            if text_is_affirmative:
                 tool_call            = session.pending_tool
                 session.pending_tool = None
                 session.state        = SessionState.IDLE
@@ -65,12 +79,14 @@ class WhatsAppOrchestrator:
                     tool_call=tool_call,              # carry tool_call so llm.py can always resolve name/id
                 ))
                 if tool_call.tool_name == "appointment":
+                    if result.get("action") in ("BOOK", "CANCEL"):
+                        session.memory_loaded = False
                     formatted = self._format_booking_result(result, tool_call.args)
                     if formatted:
                         self._responder(formatted, context)
                         return
 
-            elif _is_negative(wa_message.text):
+            elif text_is_negative:
                 session.pending_tool = None
                 session.state        = SessionState.IDLE
                 session.history.append(ChatTurn(role=ChatRole.USER, content=wa_message.text))
@@ -94,8 +110,14 @@ class WhatsAppOrchestrator:
         else:
             use_full_tools = session.booking_intent or session.turn_count >= 3
             tool_schemas   = PATIENT_TOOLS if use_full_tools else PATIENT_TOOLS_WARMUP
-            system_prompt  = PATIENT_SYSTEM_PROMPT + f"\n\nToday's date is {date.today().isoformat()}."
+            if not session.memory_loaded:
+                self._preload_memory(session, context.wa_message)
+            system_prompt = PATIENT_SYSTEM_PROMPT + f"\n\nToday's date is {date.today().isoformat()}."
+            if session.memory_context:
+                system_prompt += f"\n\nPATIENT CONTEXT (from DB):\n{session.memory_context}"
         final_text = self.fallback_text
+
+        kg_empty_streak = 0
 
         for _ in range(self.max_iterations):
             print("  [Thinking...]", flush=True)
@@ -134,13 +156,38 @@ class WhatsAppOrchestrator:
                 content=json.dumps(result),
                 tool_call=agent_response.tool_call,  # carry tool_call so llm.py can always resolve name/id
             ))
+
+            if agent_response.tool_call.tool_name == "kg_retriever":
+                if not result.get("doctors"):
+                    kg_empty_streak += 1
+                    if kg_empty_streak >= 2:
+                        final_text = (
+                            "I wasn't able to find a matching doctor at this hospital. "
+                            "Could you try a different specialty or doctor name?"
+                        )
+                        break
+                else:
+                    kg_empty_streak = 0
+
             if agent_response.tool_call.tool_name == "appointment":
+                if result.get("action") in ("BOOK", "CANCEL"):
+                    session.memory_loaded = False
                 formatted = self._format_booking_result(result, agent_response.tool_call.args)
                 if formatted:
                     final_text = formatted
                     break
 
         self._responder(final_text, context)
+
+    def _preload_memory(self, session, wa_message: WAMessage):
+        try:
+            from tools.memory_tool import fetch_patient_context
+            _, context_str = fetch_patient_context(wa_message.from_number, wa_message.hospital_id)
+            session.memory_context = context_str
+            session.memory_loaded  = True
+        except Exception as exc:
+            logger.warning("memory preload failed: %s", exc)
+            session.memory_loaded = True   # avoid retrying on every turn if DB is down
 
     def _hydrate(self, wa_message: WAMessage) -> OrchestratorContext:
         session = self.repository.get_session(wa_message.hospital_id, wa_message.from_number)
@@ -186,6 +233,12 @@ class WhatsAppOrchestrator:
         elif tool_call.tool_name == "kg_retriever":
             from tools.kg_retriever import retrieve_context
             return retrieve_context(**tool_call.args)
+        elif tool_call.tool_name == "memory_tool":
+            from tools.memory_tool import run as memory_run
+            return memory_run(
+                phone=context.wa_message.from_number,
+                hospital_id=context.wa_message.hospital_id,
+            )
         elif tool_call.tool_name == "query_data":
             from tools.query_data import run_query
             return run_query(

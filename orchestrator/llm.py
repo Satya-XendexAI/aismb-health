@@ -105,7 +105,6 @@ class GeminiLLMAdapter:
                             tool_use_id = prev_turn.tool_call.tool_use_id
                             tool_name   = prev_turn.tool_call.tool_name
                             break
-
                 # Safety net: Gemini rejects a tool result with no matching function_call
                 # earlier in the SAME request (e.g. history was trimmed mid-pair). Drop it
                 # rather than send something guaranteed to be rejected.
