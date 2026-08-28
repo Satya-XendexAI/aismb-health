@@ -95,13 +95,18 @@ def get_session_impact(doctor_id: str, date: str, hospital_id: str) -> dict:
 
     hospital_city = _get_hospital_city(hospital_id)
 
+    # Cache distance results by location to avoid redundant Gemini calls
+    dist_cache: dict = {}
     patients = []
     for row in rows:
         age = row["age"]
         location = row["location"] or ""
-        dist = _resolve_distance(location, hospital_city) if location else {
-            "estimated_km": None, "is_outstation": False, "distance_confidence": "low",
-        }
+        if location:
+            if location not in dist_cache:
+                dist_cache[location] = _resolve_distance(location, hospital_city)
+            dist = dist_cache[location]
+        else:
+            dist = {"estimated_km": None, "is_outstation": False, "distance_confidence": "low"}
         patients.append({
             "token_id":            str(row["token_id"]),
             "token_number":        row["token_number"],

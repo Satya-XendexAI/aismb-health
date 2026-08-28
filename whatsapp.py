@@ -24,7 +24,7 @@ from fastapi.responses import PlainTextResponse, JSONResponse
 from orchestrator import WhatsAppOrchestrator, InMemoryRepository, GeminiLLMAdapter, WAMessage
 
 load_dotenv()
-logging.basicConfig(level=logging.WARNING)
+logging.basicConfig(level=logging.ERROR, format="%(name)s %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 # ── Config ──────────────────────────────────────────────────────────────

@@ -50,6 +50,16 @@ class WhatsAppOrchestrator:
         self.max_history_turns = max_history_turns
 
     def handle_message(self, wa_message: WAMessage):
+        try:
+            self._handle_message_inner(wa_message)
+        except Exception as exc:
+            logger.error("Unhandled error in handle_message: %s", exc, exc_info=True)
+            try:
+                self.notifier.send(wa_message.from_number, self.fallback_text)
+            except Exception:
+                pass
+
+    def _handle_message_inner(self, wa_message: WAMessage):
         context = self._hydrate(wa_message)
         session = context.session
 
@@ -176,7 +186,11 @@ class WhatsAppOrchestrator:
 
             self._log_tool(agent_response.tool_call)
             print("  [Executing tool, waiting for result...]", flush=True)
-            result = self._execute_tool(agent_response.tool_call, context)
+            try:
+                result = self._execute_tool(agent_response.tool_call, context)
+            except Exception as tool_exc:
+                logger.error("Tool %s failed: %s", agent_response.tool_call.tool_name, tool_exc, exc_info=True)
+                result = {"error": str(tool_exc)}
             session.history.append(ChatTurn(
                 role=ChatRole.TOOL_RESULT,
                 content=json.dumps(result),

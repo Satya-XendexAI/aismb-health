@@ -72,7 +72,7 @@ def print_status(from_number: str, repository: InMemoryRepository):
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main():
-    logging.basicConfig(level=logging.WARNING)
+    logging.basicConfig(level=logging.ERROR, format="%(name)s %(levelname)s: %(message)s")
 
     repository = InMemoryRepository(doctors=DOCTORS, admins=ADMINS)
 
