@@ -111,6 +111,20 @@ stages:
                   --name $(aksName) \
                   --command "kubectl create namespace $(k8sNamespace) --dry-run=client -o yaml | kubectl apply -f -"
 
+                # Recreate the secret from pipeline variables. Resolution MUST work:
+                # if any variable is empty the step fails loudly (no silent fallback
+                # to stale secrets). Secret values are never printed.
+                req_vars="GEMINI_API_KEY GEMINI_TEMPERATURE NEO4J_URI NEO4J_USERNAME NEO4J_PASSWORD NEO4J_DATABASE AURA_INSTANCEID AURA_INSTANCENAME DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD PHONE_NUMBER_ID WABA_ID ACCESS_TOKEN VERIFY_TOKEN WEBHOOK_SECRET"
+                missing=0
+                echo "Secret variable presence check (values hidden):"
+                for v in $req_vars; do
+                  if [ -z "${!v}" ]; then echo "  $v: MISSING"; missing=1; else echo "  $v: ok"; fi
+                done
+                if [ "$missing" -ne 0 ]; then
+                  echo "ERROR: one or more secret variables are not resolved by the pipeline."
+                  echo "Fix the Azure DevOps variable definitions (exact names, scope/group linkage, and ensure no empty pipeline-level variable overrides the group value), then re-run."
+                  exit 1
+                fi
                 az aks command invoke \
                   --resource-group $(aksResourceGroup) \
                   --name $(aksName) \
@@ -167,11 +181,20 @@ stages:
                 sed -i "s|myacr.azurecr.io|$(acrLoginServer)|g" $(System.ArtifactsDirectory)/manifests/*.yaml
 
                 kubectl apply -f $(System.ArtifactsDirectory)/manifests/namespace.yaml
-                kubectl apply -f $(System.ArtifactsDirectory)/manifests/secret.yaml
                 kubectl apply -f $(System.ArtifactsDirectory)/manifests/whatsapp-deployment.yaml
                 kubectl apply -f $(System.ArtifactsDirectory)/manifests/whatsapp-service.yaml
                 kubectl apply -f $(System.ArtifactsDirectory)/manifests/interface-deployment.yaml
                 kubectl apply -f $(System.ArtifactsDirectory)/manifests/interface-service.yaml
+                kubectl apply -f $(System.ArtifactsDirectory)/manifests/hpa.yaml
+                kubectl apply -f $(System.ArtifactsDirectory)/manifests/pdb.yaml
+                kubectl apply -f $(System.ArtifactsDirectory)/manifests/ingress.yaml
+
+                # Force a rolling restart so the newly built :latest image (and any
+                # updated secrets/env) go live immediately. This intentionally wipes
+                # the in-memory session state on each deploy.
+                kubectl rollout restart deployment/aismb-interface deployment/aismb-whatsapp -n $(k8sNamespace)
+                kubectl rollout status deployment/aismb-interface -n $(k8sNamespace) --timeout=180s
+                kubectl rollout status deployment/aismb-whatsapp -n $(k8sNamespace) --timeout=180s
 
           - task: AzureCLI@2
             displayName: 'Show service endpoints'
@@ -182,3 +205,5 @@ stages:
               inlineScript: |
                 kubectl get svc -n $(k8sNamespace)
                 echo "If EXTERNAL-IP is <pending>, wait and re-run: kubectl get svc -n $(k8sNamespace)"
+                kubectl get ingress -n $(k8sNamespace)
+                echo "Ingress ADDRESS is the single HTTPS endpoint for both apps. Create the TLS secret 'aismb-tls' (kubectl create secret tls aismb-tls --cert=.. --key=..) and point DNS at the address."

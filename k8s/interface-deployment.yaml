@@ -15,6 +15,15 @@ spec:
       labels:
         app: aismb-interface
     spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchLabels:
+                  app: aismb-whatsapp
+              topologyKey: kubernetes.io/hostname
+      nodeSelector:
+        kubernetes.azure.com/agentpool: agentpool
       containers:
         - name: aismb-interface
           image: hsptlagnrgstry.azurecr.io/aismb-health:latest
@@ -30,11 +39,11 @@ spec:
               value: "8001"
           resources:
             requests:
-              cpu: 250m
-              memory: 256Mi
+              cpu: 1500m
+              memory: 4Gi
             limits:
-              cpu: 500m
-              memory: 512Mi
+              cpu: "3"
+              memory: 10Gi
           startupProbe:
             tcpSocket:
               port: 8001

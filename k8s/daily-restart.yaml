@@ -1,0 +1,66 @@
+# Scheduled daily restart of the agent services to free memory / reset load.
+# A CronJob triggers `kubectl rollout restart` on the two deployments.
+# NOTE: AKS CronJobs run on UTC. "30 18 * * *" == 00:00 IST (UTC+5:30).
+# Change the schedule (crontab format) to taste.
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: restart-sa
+  namespace: aismb-health
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: restart-role
+  namespace: aismb-health
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "watch", "patch", "update"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: restart-rolebinding
+  namespace: aismb-health
+subjects:
+  - kind: ServiceAccount
+    name: restart-sa
+    namespace: aismb-health
+roleRef:
+  kind: Role
+  name: restart-role
+  apiGroup: rbac.authorization.k8s.io
+
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: daily-deployments-restart
+  namespace: aismb-health
+spec:
+  schedule: "30 18 * * *"   # 00:00 IST daily
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: restart-sa
+          restartPolicy: OnFailure
+          containers:
+            - name: kubectl
+              image: bitnami/kubectl:latest
+              command:
+                - /bin/sh
+                - -c
+                - >-
+                  kubectl rollout restart
+                  deployment/aismb-interface
+                  deployment/aismb-whatsapp
+                  -n aismb-health
