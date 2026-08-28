@@ -360,7 +360,9 @@ class WhatsAppOrchestrator:
     @staticmethod
     def _format_plan_summary(plan: list, summary_line: str) -> str:
         from collections import defaultdict
-        lines = [f"ACTION PLAN — {summary_line}\n"]
+        sections = []
+
+        sections.append(f"📋 *ACTION PLAN*\n{summary_line}")
 
         # REASSIGN: group by target doctor
         reassign: dict[str, list] = defaultdict(list)
@@ -369,9 +371,10 @@ class WhatsAppOrchestrator:
                 target = a.new_doctor_name or "another doctor"
                 reassign[target].append(a.patient_name)
         for doctor, patients in reassign.items():
-            lines.append(f"• {len(patients)} patient(s) → reassigned to {doctor}")
-            for name in patients:
-                lines.append(f"  - {name}")
+            block = [f"🔄 *Reassigned → Dr. {doctor}* ({len(patients)} patients)"]
+            for i, name in enumerate(patients, 1):
+                block.append(f"{i}. {name}")
+            sections.append("\n".join(block))
 
         # SHIFT: group by delay_minutes
         shifts: dict[int, list] = defaultdict(list)
@@ -380,19 +383,21 @@ class WhatsAppOrchestrator:
                 shifts[a.delay_minutes or 0].append(a.patient_name)
         for delay, patients in sorted(shifts.items()):
             label = f"{delay} min" if delay else "unknown duration"
-            lines.append(f"• {len(patients)} patient(s) → session shifted by {label}")
-            for name in patients:
-                lines.append(f"  - {name}")
+            block = [f"⏰ *Shifted +{label}* ({len(patients)} patients)"]
+            for i, name in enumerate(patients, 1):
+                block.append(f"{i}. {name}")
+            sections.append("\n".join(block))
 
         # RETAIN
         retains = [a.patient_name for a in plan if a.action_type == "RETAIN"]
         if retains:
-            lines.append(f"• {len(retains)} patient(s) → no change (on schedule)")
-            for name in retains:
-                lines.append(f"  - {name}")
+            block = [f"✅ *No change* ({len(retains)} patients — on schedule)"]
+            for i, name in enumerate(retains, 1):
+                block.append(f"{i}. {name}")
+            sections.append("\n".join(block))
 
-        lines.append("\nReply *YES* to execute or *NO* to cancel.")
-        return "\n".join(lines)
+        sections.append("Reply *YES* to execute or *NO* to cancel.")
+        return "\n\n".join(sections)
 
     def _execute_plan(self, plan: list, context: OrchestratorContext):
         from tools.bulk_ops import bulk_reschedule
