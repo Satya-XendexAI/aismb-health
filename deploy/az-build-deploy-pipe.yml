@@ -175,6 +175,13 @@ stages:
                 kubectl apply -f $(System.ArtifactsDirectory)/manifests/pdb.yaml
                 kubectl apply -f $(System.ArtifactsDirectory)/manifests/ingress.yaml
 
+                # Force a rolling restart so the newly built :latest image (and any
+                # updated secrets/env) go live immediately. This intentionally wipes
+                # the in-memory session state on each deploy.
+                kubectl rollout restart deployment/aismb-interface deployment/aismb-whatsapp -n $(k8sNamespace)
+                kubectl rollout status deployment/aismb-interface -n $(k8sNamespace) --timeout=180s
+                kubectl rollout status deployment/aismb-whatsapp -n $(k8sNamespace) --timeout=180s
+
           - task: AzureCLI@2
             displayName: 'Show service endpoints'
             inputs:
