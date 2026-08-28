@@ -24,26 +24,17 @@ variables:
   aksResourceGroup: 'rg-hospital-nprd-app'
   aksName: 'hspt-dmn-agent-cluster'
 
-  # --- Secret pipeline variables (set these as SECRET vars in the UI) --------
-  # These mirror ONLY the active (non-commented) keys in .env.
-  GEMINI_API_KEY: ''          # <<SECRET>>
+  # --- Non-secret pipeline variables (safe to keep in YAML) -------------------
   GEMINI_TEMPERATURE: '0.3'
-  NEO4J_URI: ''               # <<SECRET>>
-  NEO4J_USERNAME: ''          # <<SECRET>>
-  NEO4J_PASSWORD: ''          # <<SECRET>>
-  NEO4J_DATABASE: ''          # <<SECRET>>
-  AURA_INSTANCEID: ''         # <<SECRET>>
-  AURA_INSTANCENAME: ''       # <<SECRET>>
-  DB_HOST: ''                 # <<SECRET>>
   DB_PORT: '5432'
   DB_NAME: 'postgres'
-  DB_USER: ''                 # <<SECRET>>
-  DB_PASSWORD: ''             # <<SECRET>>
-  PHONE_NUMBER_ID: ''         # <<SECRET>>
-  WABA_ID: ''                 # <<SECRET>>
-  ACCESS_TOKEN: ''            # <<SECRET>>
-  VERIFY_TOKEN: ''            # <<SECRET>>
-  WEBHOOK_SECRET: ''          # <<SECRET>>
+
+  # --- Secret variables MUST NOT be defined here (even as '') ------------------
+  # Pipeline YAML variables override variable-group / UI secret variables of the
+  # same name, so defining them as '' here would force them empty and clobber
+  # the real secrets. Set GEMINI_API_KEY, NEO4J_*, DB_USER, DB_PASSWORD,
+  # PHONE_NUMBER_ID, WABA_ID, ACCESS_TOKEN, VERIFY_TOKEN, WEBHOOK_SECRET as
+  # SECRET variables in the Azure DevOps UI (or a linked variable group).
   # ---------------------------------------------------------------------------
 
 stages:
