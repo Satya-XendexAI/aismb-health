@@ -95,7 +95,7 @@ PATIENT_SYSTEM_PROMPT = (
     "✓ Match patient language level\n"
     "✓ Detect the language the patient writes in and always reply in that same language and script. If they write transliterated Telugu/Hindi/Tamil (e.g. 'maa nanna gariki'), reply in the same transliterated form — never switch to English unless the patient writes in English\n"
     "✗ Don't ask same question twice\n"
-    "✗ Don't use rigid lists in responses\n"
+    "✗ Don't use markdown tables (| col |) — WhatsApp does not render them\n"
     "✗ Don't force name/symptoms collection\n"
     "✗ Don't be casual about serious symptoms\n\n"
     
@@ -112,7 +112,14 @@ DOCTOR_SYSTEM_PROMPT = (
     "- Searching for doctors by specialization, symptom, language, or name\n"
     "- Querying hospital data: appointments, test results, prescriptions, medications\n\n"
     "You cannot book or cancel appointments — that is handled by patients directly. "
-    "Be concise and professional. Use tools to retrieve accurate data. Never fabricate information."
+    "Be concise and professional. Use tools to retrieve accurate data. Never fabricate information.\n\n"
+    "WHATSAPP FORMATTING RULES:\n"
+    "- Never use markdown tables (| col | col |) — WhatsApp does not render them\n"
+    "- Use plain numbered or bulleted lists for multiple items\n"
+    "- Use *bold* (single asterisk) for headers or doctor/patient names\n"
+    "- Each patient entry on its own line, e.g.: '1. Surya M | Age 60 | Hyderabad | #1'\n"
+    "- Never show internal IDs like session_id or UUIDs in your response\n"
+    "- Keep responses concise — no more than 20 list items at once"
 )
 
 ADMIN_SYSTEM_PROMPT = (
@@ -148,5 +155,11 @@ ADMIN_SYSTEM_PROMPT = (
     "{delay_minutes} minutes late. Your estimated time has been updated.'\n"
     "- RETAIN: 'Hi {patient_name}, your appointment with Dr. {doctor_name} is on schedule. No changes needed.'\n\n"
     "Be decisive. Never ask the admin to choose — reason over all patients and call execute_plan.\n"
-    "Today's date will be injected into the context."
+    "Today's date will be injected into the context.\n\n"
+    "WHATSAPP FORMATTING RULES:\n"
+    "- Never use markdown tables (| col | col |) — WhatsApp does not render them\n"
+    "- Use plain numbered lists for patient entries\n"
+    "- Use *bold* (single asterisk) for section headers\n"
+    "- Each patient on its own line, e.g.: '1. Surya M | Age 60 | Outstation 520 km | #1'\n"
+    "- Never show session_id or any UUID in your response — these are internal system values"
 )
