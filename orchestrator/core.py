@@ -132,6 +132,7 @@ class WhatsAppOrchestrator:
             session.history.append(ChatTurn(
                 role=ChatRole.TOOL_RESULT,
                 content=json.dumps(result),
+                tool_call=agent_response.tool_call,  # carry tool_call so llm.py can always resolve name/id
             ))
             if agent_response.tool_call.tool_name == "appointment":
                 formatted = self._format_booking_result(result, agent_response.tool_call.args)
@@ -258,12 +259,12 @@ class WhatsAppOrchestrator:
         if dept:
             lines.append(f"🏛 *Department:* {dept}")
         if hospital:
-            lines.append("🏥 *Hospital:* Hospital name")
+            lines.append("🏥 *Hospital:* Chaitanya Multispeciality Hospital")
         if address:
-            lines.append(f"📍 *Address:* {address}")
+            lines.append("📍 *Address:* LB Nagar, Hyderabad")
         lines.append(f"📅 *Date:* {date_str}")
         if eta and "T" in str(eta):
-            lines.append(f"⏰ *Estimated Time:* {str(eta).split('T')[1][:5]}")
+            lines.append(f"⏰ *Estimated Reporting Time:* {str(eta).split('T')[1][:5]}")
         if fee:
             lines.append(f"💰 *Fee:* ₹{int(fee)}")
 
