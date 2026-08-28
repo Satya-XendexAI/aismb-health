@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="color-scheme" content="light" />
+<title>WhatsApp Test Interface</title>
+<link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+
+  <!-- ── Login overlay ─────────────────────────────────────────── -->
+  <div class="login-overlay" id="loginOverlay">
+    <div class="login-card">
+      <div class="login-logo">🏥</div>
+      <h2 class="login-title">MediNexus</h2>
+      <p class="login-sub">Select your profile to continue</p>
+
+      <div class="login-options" id="loginOptions">
+        <!-- populated by JS from /api/config -->
+      </div>
+
+      <div class="login-divider">or enter a custom number</div>
+      <div class="login-custom">
+        <input id="customNumber" type="tel" placeholder="Phone number" />
+        <button id="customBtn">Continue as Patient</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Chat UI ────────────────────────────────────────────────── -->
+  <div class="phone" id="phoneUI" style="display:none">
+    <div class="status-bar">
+      <span>9:41</span>
+      <span class="status-icons">••• 📶 🔋</span>
+    </div>
+
+    <header class="chat-header">
+      <svg class="icon back-icon" viewBox="0 0 24 24">
+        <path d="M15 18l-6-6 6-6" stroke="white" stroke-width="2" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <div class="avatar">🏥</div>
+      <div class="contact-info">
+        <div class="contact-name">Hospital Assistant</div>
+        <div class="contact-status">online</div>
+      </div>
+      <div class="role-badge" id="roleBadge"></div>
+    </header>
+
+    <main class="chat-body" id="chatBody"></main>
+
+    <footer class="chat-input">
+      <div class="input-row">
+        <svg class="icon plus-icon" viewBox="0 0 24 24">
+          <path d="M12 5v14M5 12h14" stroke="#54656f" stroke-width="2" stroke-linecap="round"/>
+        </svg>
+        <input id="textInput" type="text" placeholder="Message" autocomplete="off" />
+        <svg class="icon attach-icon" viewBox="0 0 24 24">
+          <path d="M21.4 11.4L12 20.8a5 5 0 01-7-7l9-9a3.5 3.5 0 015 5l-9 9a2 2 0 01-3-3l8-8" stroke="#54656f" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+      </div>
+      <button id="sendBtn" class="send-btn" aria-label="Send">
+        <svg class="icon" viewBox="0 0 24 24">
+          <path d="M3 20l18-8L3 4v6l12 2-12 2v6z" fill="white"/>
+        </svg>
+      </button>
+    </footer>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

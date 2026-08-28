@@ -1,0 +1,336 @@
+:root {
+  color-scheme: light;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+
+body {
+  background: #0b141a;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  min-height: 100vh;
+}
+
+.phone {
+  width: 390px;
+  height: 844px;
+  max-height: 95vh;
+  background: #111b21;
+  border-radius: 40px;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 0 40px rgba(0, 0, 0, 0.6);
+  border: 10px solid #000;
+}
+
+.status-bar {
+  background: #075e54;
+  color: white;
+  font-size: 12px;
+  display: flex;
+  justify-content: space-between;
+  padding: 6px 16px 2px;
+}
+
+.chat-header {
+  background: #075e54;
+  color: white;
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  gap: 10px;
+}
+
+.back-icon {
+  width: 22px;
+  height: 22px;
+  cursor: pointer;
+}
+
+.avatar {
+  width: 38px;
+  height: 38px;
+  background: #128c7e;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  flex-shrink: 0;
+}
+
+.contact-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.contact-name {
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.contact-status {
+  font-size: 12px;
+  color: #d9fdd3;
+}
+
+.header-icons {
+  display: flex;
+  gap: 18px;
+}
+
+.header-icons .icon {
+  width: 20px;
+  height: 20px;
+  cursor: pointer;
+}
+
+.chat-body {
+  flex: 1;
+  background: #e5ddd5;
+  padding: 12px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.bubble {
+  max-width: 75%;
+  padding: 6px 9px 8px;
+  border-radius: 8px;
+  font-size: 14.2px;
+  line-height: 1.35;
+  box-shadow: 0 1px 0.5px rgba(0, 0, 0, 0.13);
+  white-space: pre-wrap;
+  word-wrap: break-word;
+}
+
+.bubble.in {
+  background: #ffffff;
+  align-self: flex-start;
+  border-top-left-radius: 0;
+}
+
+.bubble.out {
+  background: #d9fdd3;
+  align-self: flex-end;
+  border-top-right-radius: 0;
+}
+
+.bubble .time {
+  display: block;
+  text-align: right;
+  font-size: 11px;
+  color: #667781;
+  margin-top: 2px;
+}
+
+.typing {
+  align-self: flex-start;
+  background: #ffffff;
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: #667781;
+  font-style: italic;
+}
+
+.chat-input {
+  background: #f0f0f0;
+  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.input-row {
+  flex: 1;
+  background: white;
+  border-radius: 24px;
+  display: flex;
+  align-items: center;
+  padding: 8px 12px;
+  gap: 10px;
+}
+
+#textInput {
+  flex: 1;
+  border: none;
+  outline: none;
+  font-size: 14px;
+}
+
+.plus-icon,
+.attach-icon {
+  width: 22px;
+  height: 22px;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.send-btn {
+  width: 42px;
+  height: 42px;
+  background: #00a884;
+  border: none;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.send-btn .icon {
+  width: 20px;
+  height: 20px;
+}
+
+/* ── Login overlay ───────────────────────────────────────────────── */
+
+.login-overlay {
+  position: fixed;
+  inset: 0;
+  background: #0b141a;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+
+.login-card {
+  background: #1f2c34;
+  border-radius: 16px;
+  padding: 32px 28px;
+  width: 340px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+}
+
+.login-logo {
+  font-size: 48px;
+}
+
+.login-title {
+  color: #e9edef;
+  font-size: 22px;
+  font-weight: 700;
+  margin: 0;
+}
+
+.login-sub {
+  color: #8696a0;
+  font-size: 13px;
+  margin-bottom: 4px;
+}
+
+.login-options {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.login-option-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  background: #2a3942;
+  border: 2px solid #3b4a54;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+  text-align: left;
+}
+
+.login-option-btn:hover {
+  background: #3b4a54;
+}
+
+.login-option-icon {
+  font-size: 22px;
+  flex-shrink: 0;
+}
+
+.login-option-info {
+  display: flex;
+  flex-direction: column;
+}
+
+.login-option-info strong {
+  color: #e9edef;
+  font-size: 14px;
+}
+
+.login-option-info small {
+  color: #8696a0;
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.login-divider {
+  color: #8696a0;
+  font-size: 12px;
+  text-align: center;
+  width: 100%;
+  border-top: 1px solid #2a3942;
+  padding-top: 14px;
+}
+
+.login-custom {
+  width: 100%;
+  display: flex;
+  gap: 8px;
+}
+
+.login-custom input {
+  flex: 1;
+  padding: 10px 12px;
+  background: #2a3942;
+  border: 1px solid #3b4a54;
+  border-radius: 8px;
+  color: #e9edef;
+  font-size: 13px;
+  outline: none;
+}
+
+.login-custom input::placeholder {
+  color: #8696a0;
+}
+
+.login-custom button {
+  padding: 10px 14px;
+  background: #00a884;
+  border: none;
+  border-radius: 8px;
+  color: white;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* ── Role badge in header ────────────────────────────────────────── */
+
+.role-badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: white;
+  padding: 3px 8px;
+  border-radius: 10px;
+  letter-spacing: 0.4px;
+  flex-shrink: 0;
+}

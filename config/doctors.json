@@ -1,0 +1,30 @@
+{
+  "doctors": [
+    {
+      "doctor_id": "dr-ajit-yadav--chn",
+      "phone": "911234567898",
+      "name": "Dr. Ajit Yadav",
+      "tables": [
+        "patients",
+        "tokens",
+        "doctor_sessions"
+      ]
+    },
+    {
+      "doctor_id": "dr-susan-george--chn",
+      "phone": "919059177756",
+      "name": "Dr. Susan George",
+      "tables": [
+        "patients",
+        "tokens",
+        "doctor_sessions"
+      ]
+    }
+  ],
+  "admins": [
+    {
+      "phone": "99999",
+      "name": "Admin"
+    }
+  ]
+}
