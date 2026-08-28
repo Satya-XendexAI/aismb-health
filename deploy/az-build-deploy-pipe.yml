@@ -167,11 +167,13 @@ stages:
                 sed -i "s|myacr.azurecr.io|$(acrLoginServer)|g" $(System.ArtifactsDirectory)/manifests/*.yaml
 
                 kubectl apply -f $(System.ArtifactsDirectory)/manifests/namespace.yaml
-                kubectl apply -f $(System.ArtifactsDirectory)/manifests/secret.yaml
                 kubectl apply -f $(System.ArtifactsDirectory)/manifests/whatsapp-deployment.yaml
                 kubectl apply -f $(System.ArtifactsDirectory)/manifests/whatsapp-service.yaml
                 kubectl apply -f $(System.ArtifactsDirectory)/manifests/interface-deployment.yaml
                 kubectl apply -f $(System.ArtifactsDirectory)/manifests/interface-service.yaml
+                kubectl apply -f $(System.ArtifactsDirectory)/manifests/hpa.yaml
+                kubectl apply -f $(System.ArtifactsDirectory)/manifests/pdb.yaml
+                kubectl apply -f $(System.ArtifactsDirectory)/manifests/ingress.yaml
 
           - task: AzureCLI@2
             displayName: 'Show service endpoints'
@@ -182,3 +184,5 @@ stages:
               inlineScript: |
                 kubectl get svc -n $(k8sNamespace)
                 echo "If EXTERNAL-IP is <pending>, wait and re-run: kubectl get svc -n $(k8sNamespace)"
+                kubectl get ingress -n $(k8sNamespace)
+                echo "Ingress ADDRESS is the single HTTPS endpoint for both apps. Create the TLS secret 'aismb-tls' (kubectl create secret tls aismb-tls --cert=.. --key=..) and point DNS at the address."

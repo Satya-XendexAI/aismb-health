@@ -6,7 +6,7 @@ metadata:
   labels:
     app: aismb-interface
 spec:
-  replicas: 1
+  replicas: 2
   selector:
     matchLabels:
       app: aismb-interface
@@ -15,6 +15,22 @@ spec:
       labels:
         app: aismb-interface
     spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchLabels:
+                    app: aismb-interface
+                topologyKey: kubernetes.io/hostname
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app: aismb-interface
       containers:
         - name: aismb-interface
           image: hsptlagnrgstry.azurecr.io/aismb-health:latest
@@ -34,7 +50,7 @@ spec:
               memory: 256Mi
             limits:
               cpu: 500m
-              memory: 512Mi
+              memory: 1Gi
           startupProbe:
             tcpSocket:
               port: 8001

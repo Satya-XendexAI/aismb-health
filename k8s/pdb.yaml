@@ -1,0 +1,21 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: aismb-whatsapp
+  namespace: aismb-health
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: aismb-whatsapp
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: aismb-interface
+  namespace: aismb-health
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: aismb-interface

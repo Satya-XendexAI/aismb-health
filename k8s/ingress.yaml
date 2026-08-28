@@ -1,0 +1,38 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aismb-ingress
+  namespace: aismb-health
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "false"  # Front Door terminates TLS; forwards HTTP to this ingress
+    # For automatic Let's Encrypt certs: install cert-manager, create a ClusterIssuer
+    # named "letsencrypt-prod", then uncomment the next line.
+    # cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  ingressClassName: nginx
+  tls:
+    # When you have a real cert, create the secret and set the hostname here:
+    #   kubectl create secret tls aismb-tls --cert=tls.crt --key=tls.key
+    #   then set hosts: [your.domain.here] below.
+    - hosts:
+        - aismb-health.example.com   # <-- replace with your real domain when adding a cert
+      secretName: aismb-tls          # until this secret exists, NGINX serves its self-signed fallback cert
+  rules:
+    # Host-less (catch-all) so it works on the ingress IP immediately.
+    # Add "host: your.domain.here" above the http: block once you have a domain.
+    - http:
+        paths:
+          - path: /webhook
+            pathType: Prefix
+            backend:
+              service:
+                name: aismb-whatsapp-service
+                port:
+                  number: 8000
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: aismb-interface-service
+                port:
+                  number: 8001
