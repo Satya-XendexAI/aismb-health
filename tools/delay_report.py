@@ -16,7 +16,7 @@ def get_delay_preview(delay_minutes: int, doctor_id: str, hospital_id: str) -> d
         SELECT
             ds.session_id,
             ds.started_at,
-            ds.avg_consultation_minutes,
+            d.avg_consultation_minutes,
             d.name          AS doctor_name,
             t.token_id,
             t.token_number,
