@@ -25,3 +25,6 @@ class InMemoryRepository:
 
     def get_doctor_config(self, from_number: str) -> dict | None:
         return next((d for d in self._doctors if d["phone"] == from_number), None)
+
+    def get_admin_config(self, from_number: str) -> dict | None:
+        return next((a for a in self._admins if a["phone"] == from_number), None)

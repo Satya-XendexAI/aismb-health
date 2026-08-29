@@ -147,9 +147,13 @@ class WhatsAppOrchestrator:
             tool_schemas    = ADMIN_TOOLS
             system_prompt   = ADMIN_SYSTEM_PROMPT + f"\n\nToday's date is {date.today().isoformat()}."
             self.max_iterations = 10   # admin flow needs kg_retriever + impact + available + plan
+            admin_cfg = self.repository.get_admin_config(wa_message.from_number)
+            known_name = admin_cfg["name"] if admin_cfg else None
         elif session.role == Role.DOCTOR:
             tool_schemas  = DOCTOR_TOOLS
             system_prompt = DOCTOR_SYSTEM_PROMPT
+            doc_cfg = self.repository.get_doctor_config(wa_message.from_number)
+            known_name = doc_cfg["name"] if doc_cfg else None
         else:
             use_full_tools = session.booking_intent or session.turn_count >= 3
             tool_schemas   = PATIENT_TOOLS if use_full_tools else PATIENT_TOOLS_WARMUP
@@ -158,6 +162,12 @@ class WhatsAppOrchestrator:
             system_prompt = PATIENT_SYSTEM_PROMPT + f"\n\nToday's date is {date.today().isoformat()}."
             if session.memory_context:
                 system_prompt += f"\n\nPATIENT CONTEXT (from DB):\n{session.memory_context}"
+            known_name = None  # patient name resolved from memory_context by the LLM
+
+        session_info = f"\n\nSESSION INFO:\n- Turn: {session.turn_count}"
+        if known_name:
+            session_info += f"\n- Name: {known_name}"
+        system_prompt += session_info
         final_text = self.fallback_text
 
         kg_empty_streak = 0
@@ -551,7 +561,7 @@ class WhatsAppOrchestrator:
         if dept:
             lines.append(f"🏛 *Department:* {dept}")
         if hospital:
-            lines.append("🏥 *Hospital:* Hospital name")
+            lines.append(f"🏥 *Hospital:* {hospital}")
         if address:
             lines.append(f"📍 *Address:* {address}")
         lines.append(f"📅 *Date:* {date_str}")
