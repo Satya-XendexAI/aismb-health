@@ -433,9 +433,13 @@ class WhatsAppOrchestrator:
     def _interrupt_delay(self, args: dict, context: OrchestratorContext):
         from tools.delay_report import get_delay_preview
         delay_minutes = int(args.get("delay_minutes", 0))
+        doc_config = self.repository.get_doctor_config(context.wa_message.from_number)
+        if not doc_config:
+            self._responder("Could not find your doctor profile. Please contact admin.", context)
+            return
         preview = get_delay_preview(
             delay_minutes=delay_minutes,
-            doctor_phone=context.wa_message.from_number,
+            doctor_id=doc_config["doctor_id"],
             hospital_id=context.wa_message.hospital_id,
         )
         if "error" in preview:

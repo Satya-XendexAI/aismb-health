@@ -8,20 +8,8 @@ from tools.appointment.database import get_connection, shift_session_start
 logger = logging.getLogger(__name__)
 
 
-def _get_doctor_id_by_phone(phone: str, hospital_id: str) -> str | None:
-    sql = "SELECT doctor_id FROM doctors WHERE phone = %s AND hospital_id = %s AND is_active = true"
-    with get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(sql, (phone, hospital_id))
-            row = cur.fetchone()
-            return row[0] if row else None
-
-
-def get_delay_preview(delay_minutes: int, doctor_phone: str, hospital_id: str) -> dict:
+def get_delay_preview(delay_minutes: int, doctor_id: str, hospital_id: str) -> dict:
     """Build preview of patients affected by the doctor's self-reported delay."""
-    doctor_id = _get_doctor_id_by_phone(doctor_phone, hospital_id)
-    if not doctor_id:
-        return {"error": "Could not find your doctor profile. Please contact admin."}
 
     today = date.today().isoformat()
     sql = """
