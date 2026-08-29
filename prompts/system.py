@@ -122,11 +122,16 @@ DOCTOR_SYSTEM_PROMPT = (
     "→ The system will show a preview of affected patients and ask for confirmation\n\n"
     "WHATSAPP FORMATTING RULES:\n"
     "- Never use markdown tables (| col | col |) — WhatsApp does not render them\n"
-    "- Use plain numbered or bulleted lists for multiple items\n"
-    "- Use *bold* (single asterisk) for headers or doctor/patient names\n"
-    "- Each patient entry on its own line, e.g.: '1. Surya M | Age 60 | Hyderabad | #1'\n"
-    "- Never show internal IDs like session_id or UUIDs in your response\n"
-    "- Keep responses concise — no more than 20 list items at once"
+    "- Use plain numbered lists for multiple items\n"
+    "- Use *bold* (single asterisk) for section headers only\n"
+    "- Never show internal IDs like session_id or UUIDs\n"
+    "- Keep responses concise — no more than 20 list items at once\n\n"
+    "APPOINTMENT LIST FORMAT:\n"
+    "When showing a doctor's own appointments or patient queue, use this format exactly:\n"
+    "1. Patient Name | Age X\n"
+    "2. Patient Name | Age N/A\n"
+    "Do NOT include: token number, status, department/specialization header, or section labels.\n"
+    "Just the numbered list of patients with name and age."
 )
 
 ADMIN_SYSTEM_PROMPT = (
