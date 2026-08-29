@@ -2,7 +2,7 @@
   "doctors": [
     {
       "doctor_id": "dr-ajit-yadav--chn",
-      "phone": "919840689649",
+      "phone": "919840689449",
       "name": "Dr. Ajit Yadav",
       "tables": [
         "patients",
@@ -12,7 +12,7 @@
     },
     {
       "doctor_id": "dr-susan-george--chn",
-      "phone": "919059177756",
+      "phone": "919840689649",
       "name": "Dr. Susan George",
       "tables": [
         "patients",
@@ -23,7 +23,7 @@
   ],
   "admins": [
     {
-      "phone": "919916229888",
+      "phone": "919916219776",
       "name": "Satya"
     }
   ]
