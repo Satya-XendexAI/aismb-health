@@ -108,6 +108,15 @@ class WhatsAppOrchestrator:
                     content=json.dumps(result),
                     tool_call=tool_call,              # carry tool_call so llm.py can always resolve name/id
                 ))
+                if tool_call.tool_name == "report_delay":
+                    sent   = result.get("patients_notified", 0)
+                    failed = result.get("patients_failed", 0)
+                    delay  = tool_call.args.get("preview", {}).get("delay_minutes", "?")
+                    msg    = f"✅ Done. Session shifted by {delay} mins. {sent} patient(s) notified."
+                    if failed:
+                        msg += f" ({failed} could not be reached — no phone on record.)"
+                    self._responder(msg, context)
+                    return
                 if tool_call.tool_name == "appointment":
                     if result.get("action") in ("BOOK", "CANCEL"):
                         session.memory_loaded = False
@@ -172,6 +181,11 @@ class WhatsAppOrchestrator:
             # Plan gate: intercept execute_plan before the normal gate
             if agent_response.tool_call.tool_name == "execute_plan":
                 self._interrupt_plan(agent_response.tool_call.args, context)
+                return
+
+            # Delay gate: intercept report_delay, build preview, ask doctor to confirm
+            if agent_response.tool_call.tool_name == "report_delay":
+                self._interrupt_delay(agent_response.tool_call.args, context)
                 return
 
             gate_result = self._gate(agent_response.tool_call, context)
@@ -324,6 +338,9 @@ class WhatsAppOrchestrator:
                 date=tool_call.args["date"],
                 hospital_id=context.wa_message.hospital_id,
             )
+        elif tool_call.tool_name == "report_delay":
+            from tools.delay_report import execute_delay_report
+            return execute_delay_report(tool_call.args["preview"], self.notifier)
         return {"error": "unknown tool"}
 
     def _log_tool(self, tool_call):
@@ -411,6 +428,44 @@ class WhatsAppOrchestrator:
             sections.append("\n".join(block))
 
         sections.append("Reply *YES* to execute or *NO* to cancel.")
+        return "\n\n".join(sections)
+
+    def _interrupt_delay(self, args: dict, context: OrchestratorContext):
+        from tools.delay_report import get_delay_preview
+        delay_minutes = int(args.get("delay_minutes", 0))
+        preview = get_delay_preview(
+            delay_minutes=delay_minutes,
+            doctor_phone=context.wa_message.from_number,
+            hospital_id=context.wa_message.hospital_id,
+        )
+        if "error" in preview:
+            self._responder(preview["error"], context)
+            return
+        from models.session import ToolCall as TC
+        context.session.pending_tool = TC(
+            tool_name="report_delay",
+            args={"preview": preview},
+            tool_use_id=str(uuid.uuid4()),
+        )
+        context.session.state = SessionState.AWAITING_CONFIRM
+        self.repository.save_session(context.session)
+        try:
+            self.notifier.send(context.wa_message.from_number, self._format_delay_preview(preview))
+        except Exception:
+            pass
+
+    @staticmethod
+    def _format_delay_preview(preview: dict) -> str:
+        delay   = preview["delay_minutes"]
+        doctor  = preview["doctor_name"]
+        patients = preview["patients"]
+        sections = [
+            f"📋 *Delay Notification Preview*\nDr. {doctor} — {delay}-min delay · {len(patients)} patients waiting"
+        ]
+        lines = [f"{p['token_number']}. {p['patient_name']} — Est. {p['estimated_time']}"
+                 for p in patients]
+        sections.append("\n".join(lines))
+        sections.append("Reply *YES* to send notifications or *NO* to cancel.")
         return "\n\n".join(sections)
 
     def _execute_plan(self, plan: list, context: OrchestratorContext):

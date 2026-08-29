@@ -196,9 +196,31 @@ _query_data_schema = {
     },
 }
 
+_report_delay_schema = {
+    "type": "function",
+    "function": {
+        "name": "report_delay",
+        "description": (
+            "Report that you (the doctor) will be late and notify all your waiting patients "
+            "with updated estimated times. Call this as soon as the doctor mentions a delay — "
+            "no other info needed. The system will show a preview for confirmation before sending."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "delay_minutes": {
+                    "type": "integer",
+                    "description": "Number of minutes the doctor will be delayed (e.g. 30, 60)",
+                },
+            },
+            "required": ["delay_minutes"],
+        },
+    },
+}
+
 PATIENT_TOOLS        = [_appointment_schema, _list_appointments_schema, _kg_retriever_schema, _memory_tool_schema]
 PATIENT_TOOLS_WARMUP = [_list_appointments_schema, _kg_retriever_schema, _memory_tool_schema]
-DOCTOR_TOOLS         = [_kg_retriever_schema, _query_data_schema]
+DOCTOR_TOOLS         = [_kg_retriever_schema, _query_data_schema, _report_delay_schema]
 ADMIN_TOOLS          = [_kg_retriever_schema, _get_session_impact_schema, _find_available_doctors_schema, _execute_plan_schema, _query_data_schema]
 
 ROLE_PERMISSIONS = {
@@ -210,4 +232,5 @@ ROLE_PERMISSIONS = {
     "get_session_impact":   {Role.ADMIN},
     "find_available_doctors": {Role.ADMIN},
     "execute_plan":         {Role.ADMIN},
+    "report_delay":         {Role.DOCTOR},
 }
