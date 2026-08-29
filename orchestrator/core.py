@@ -466,7 +466,7 @@ class WhatsAppOrchestrator:
         sections = [
             f"📋 *Delay Notification Preview*\nDr. {doctor} — {delay}-min delay · {len(patients)} patients waiting"
         ]
-        lines = [f"{p['token_number']}. {p['patient_name']} — Est. {p['estimated_time']}"
+        lines = [f"{p['token_number']}. {p['patient_name']} — Reporting time: {p['estimated_time']}"
                  for p in patients]
         sections.append("\n".join(lines))
         sections.append("Reply *YES* to send notifications or *NO* to cancel.")
@@ -556,7 +556,7 @@ class WhatsAppOrchestrator:
             lines.append(f"📍 *Address:* {address}")
         lines.append(f"📅 *Date:* {date_str}")
         if eta and "T" in str(eta):
-            lines.append(f"⏰ *Estimated Time:* {str(eta).split('T')[1][:5]}")
+            lines.append(f"⏰ *Reporting Time:* {str(eta).split('T')[1][:5]}")
         if fee:
             lines.append(f"💰 *Fee:* ₹{int(fee)}")
 

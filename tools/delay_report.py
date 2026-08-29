@@ -84,7 +84,7 @@ def execute_delay_report(preview: dict, notifier) -> dict:
             continue
         msg = (
             f"Hi {p['patient_name']}, Dr. {doctor_name}'s session is running "
-            f"~{delay_minutes} mins late. Your updated estimated time is "
+            f"~{delay_minutes} mins late. Your reporting time is "
             f"{p['estimated_time']}. We apologize for the inconvenience."
         )
         try:

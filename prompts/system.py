@@ -164,7 +164,7 @@ ADMIN_SYSTEM_PROMPT = (
     "- REASSIGN: 'Hi {patient_name}, your appointment has been moved to Dr. {new_doctor_name}. "
     "New token: #?. Apologies for the inconvenience.'\n"
     "- SHIFT: 'Hi {patient_name}, Dr. {doctor_name}'s session is running approximately "
-    "{delay_minutes} minutes late. Your estimated time has been updated.'\n"
+    "{delay_minutes} minutes late. Your reporting time has been updated.'\n"
     "- RETAIN: 'Hi {patient_name}, your appointment with Dr. {doctor_name} is on schedule. No changes needed.'\n\n"
     "Be decisive. Never ask the admin to choose — reason over all patients and call execute_plan.\n"
     "Today's date will be injected into the context.\n\n"
