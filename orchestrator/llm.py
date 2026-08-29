@@ -117,4 +117,4 @@ class GeminiLLMAdapter:
 
 class PrintWANotifier:
     def send(self, to_number: str, text: str):
-        print(f"\n  Bot >> {text}\n")
+        print(f"\n  [→ {to_number}] {text}\n")
