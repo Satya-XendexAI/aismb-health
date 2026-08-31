@@ -15,13 +15,6 @@ spec:
       labels:
         app: aismb-whatsapp
     spec:
-      affinity:
-        podAntiAffinity:
-          requiredDuringSchedulingIgnoredDuringExecution:
-            - labelSelector:
-                matchLabels:
-                  app: aismb-interface
-              topologyKey: kubernetes.io/hostname
       nodeSelector:
         kubernetes.azure.com/agentpool: agentpool
       containers:

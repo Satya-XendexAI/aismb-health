@@ -15,12 +15,9 @@ kubectl apply -f "$DIR/namespace.yaml"
 kubectl apply -f "$DIR/secret.yaml"
 kubectl apply -f "$DIR/whatsapp-deployment.yaml"
 kubectl apply -f "$DIR/whatsapp-service.yaml"
-kubectl apply -f "$DIR/interface-deployment.yaml"
-kubectl apply -f "$DIR/interface-service.yaml"
 
 echo ">> Applied. Watching rollout..."
 kubectl rollout status deployment/aismb-whatsapp -n aismb-health --timeout=120s
-kubectl rollout status deployment/aismb-interface -n aismb-health --timeout=120s
 
 echo ">> External IPs (may take a minute to be assigned):"
 kubectl get svc -n aismb-health
