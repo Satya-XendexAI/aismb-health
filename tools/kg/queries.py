@@ -5,12 +5,15 @@ from pathlib import Path
 import numpy as np
 
 from tools.kg.client import driver, database, embed_client, EMBED_MODEL, TENANT_ID
+from orchestrator.tracing import traced, record_usage
 
 _SQLITE_PATH = Path(__file__).parent.parent.parent / "data" / "slots.db"
 
 
+@traced("kg_retriever.embed", run_type="llm", tags=["kg", "embedding"])
 def embed(text: str) -> np.ndarray:
     resp = embed_client.embeddings.create(input=text, model=EMBED_MODEL)
+    record_usage(resp, model=EMBED_MODEL)
     return np.array(resp.data[0].embedding, dtype=np.float32)
 
 

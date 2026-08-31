@@ -3,6 +3,7 @@ import difflib
 
 from prompts.kg_retriever import KG_PARSE_SYSTEM
 from tools.kg.client import driver, database, gemini_client, PARSE_MODEL
+from orchestrator.tracing import traced, record_usage
 
 _SPEC_NAMES_CACHE = None
 
@@ -50,6 +51,7 @@ def resolve_specializations(specs) -> list[str]:
     return out
 
 
+@traced("kg_retriever._parse_query", run_type="llm", tags=["kg", "llm"])
 def parse_query(query: str) -> dict:
     resp = gemini_client.chat.completions.create(
         model=PARSE_MODEL,
@@ -61,6 +63,7 @@ def parse_query(query: str) -> dict:
         temperature=0.0,
         max_tokens=200,
     )
+    record_usage(resp, model=PARSE_MODEL)
     try:
         parsed = json.loads(resp.choices[0].message.content)
     except json.JSONDecodeError:
