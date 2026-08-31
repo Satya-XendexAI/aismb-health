@@ -118,47 +118,37 @@ def find_by_fulltext(keyword: str, limit: int = 20, tenant_id: str | None = None
 
 
 def semantic_search(query: str, n_results: int = 8, tenant_id: str | None = None) -> list[dict]:
-    q_vec         = embed(query)
+    q_vec = embed(query)
     tenant_filter = "AND d.tenant_id STARTS WITH $tenant_id" if tenant_id else ""
 
+    cypher = f"""
+    CALL db.index.vector.queryNodes('doctor_embedding_index', $n_results, $q_vec)
+    YIELD node AS d, score
+    WHERE score >= 0.35
+    {tenant_filter}
+    OPTIONAL MATCH (d)-[:SPECIALIZES_IN]->(sp:Specialization)
+    OPTIONAL MATCH (d)-[:PRACTICES_AT]->(h:Hospital)
+    OPTIONAL MATCH (d)-[:SPEAKS]->(l:Language)
+    RETURN d.sql_id AS sql_id, d.id AS id, d.name AS name,
+           d.designation AS designation, d.experience_years AS experience_years,
+           d.consultation_fee AS consultation_fee,
+           d.tenant_id AS tenant_id,
+           collect(DISTINCT sp.name) AS specializations,
+           collect(DISTINCT h.name)  AS hospitals,
+           collect(DISTINCT l.name)  AS languages,
+           score
+    """
+
     def _tx(tx):
-        return [dict(r) for r in tx.run(
-            f"""
-            MATCH (d:Doctor)
-            WHERE d.embedding IS NOT NULL
-            {tenant_filter}
-            OPTIONAL MATCH (d)-[:SPECIALIZES_IN]->(sp:Specialization)
-            OPTIONAL MATCH (d)-[:PRACTICES_AT]->(h:Hospital)
-            OPTIONAL MATCH (d)-[:SPEAKS]->(l:Language)
-            RETURN d.sql_id AS sql_id, d.id AS id, d.name AS name,
-                   d.designation AS designation, d.experience_years AS experience_years,
-                   d.consultation_fee AS consultation_fee,
-                   d.tenant_id AS tenant_id, d.embedding AS embedding,
-                   collect(DISTINCT sp.name) AS specializations,
-                   collect(DISTINCT h.name)  AS hospitals,
-                   collect(DISTINCT l.name)  AS languages
-            """,
-            tenant_id=tenant_id,
-        )]
+        return [dict(r) for r in tx.run(cypher, n_results=n_results, q_vec=q_vec.tolist(), tenant_id=tenant_id)]
 
     with driver.session(database=database) as s:
         rows = s.execute_read(_tx)
 
-    if not rows:
-        return []
-
-    doc_vecs = np.array([r.pop("embedding") for r in rows], dtype=np.float32)
-    norms    = np.linalg.norm(doc_vecs, axis=1, keepdims=True)
-    doc_vecs = doc_vecs / np.where(norms == 0, 1, norms)
-    q_norm   = q_vec / (np.linalg.norm(q_vec) or 1)
-    scores   = doc_vecs @ q_norm
-
-    ranked = sorted(zip(scores.tolist(), rows), key=lambda x: x[0], reverse=True)
     return [
         {"id": r.get("sql_id") or r.get("id", ""), "text": r.get("bio", ""),
-         "metadata": r, "score": float(sc)}
-        for sc, r in ranked[:n_results]
-        if sc >= 0.35
+         "metadata": r, "score": float(r.get("score", 0))}
+        for r in rows
     ]
 
 
