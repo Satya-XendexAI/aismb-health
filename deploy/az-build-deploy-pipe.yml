@@ -99,11 +99,13 @@ stages:
               scriptType: 'bash'
               scriptLocation: 'inlineScript'
               inlineScript: |
-                az aks command invoke \
-                  --resource-group $(aksResourceGroup) \
-                  --name $(aksName) \
-                  --command "kubectl create namespace $(k8sNamespace) --dry-run=client -o yaml | kubectl apply -f -"
-
+                set -euo pipefail
+                # Get AKS credentials
+                az aks get-credentials --resource-group $(aksResourceGroup) --name $(aksName) --overwrite-existing
+                
+                # Create namespace
+                kubectl create namespace $(k8sNamespace) --dry-run=client -o yaml | kubectl apply -f -
+                
                 # Recreate the secret from pipeline variables. Resolution MUST work:
                 # if any variable is empty the step fails loudly (no silent fallback
                 # to stale secrets). Secret values are never printed.
@@ -118,34 +120,32 @@ stages:
                   echo "Fix the Azure DevOps variable definitions (exact names, scope/group linkage, and ensure no empty pipeline-level variable overrides the group value), then re-run."
                   exit 1
                 fi
-                az aks command invoke \
-                  --resource-group $(aksResourceGroup) \
-                  --name $(aksName) \
-                  --command "kubectl create secret generic aismb-secrets -n $(k8sNamespace) \
-                    --from-literal=GEMINI_API_KEY='$GEMINI_API_KEY' \
-                    --from-literal=GEMINI_TEMPERATURE='$GEMINI_TEMPERATURE' \
-                    --from-literal=NEO4J_URI='$NEO4J_URI' \
-                    --from-literal=NEO4J_USERNAME='$NEO4J_USERNAME' \
-                    --from-literal=NEO4J_PASSWORD='$NEO4J_PASSWORD' \
-                    --from-literal=NEO4J_DATABASE='$NEO4J_DATABASE' \
-                    --from-literal=AURA_INSTANCEID='$AURA_INSTANCEID' \
-                    --from-literal=AURA_INSTANCENAME='$AURA_INSTANCENAME' \
-                    --from-literal=DB_HOST='$DB_HOST' \
-                    --from-literal=DB_PORT='$DB_PORT' \
-                    --from-literal=DB_NAME='$DB_NAME' \
-                    --from-literal=DB_USER='$DB_USER' \
-                    --from-literal=DB_PASSWORD='$DB_PASSWORD' \
-                    --from-literal=PHONE_NUMBER_ID='$PHONE_NUMBER_ID' \
-                    --from-literal=WABA_ID='$WABA_ID' \
-                    --from-literal=ACCESS_TOKEN='$ACCESS_TOKEN' \
-                    --from-literal=VERIFY_TOKEN='$VERIFY_TOKEN' \
-                    --from-literal=WEBHOOK_SECRET='$WEBHOOK_SECRET' \
-                    --from-literal=LANGSMITH_API_KEY='$LANGSMITH_API_KEY' \
-                    --from-literal=LANGSMITH_TRACING='$LANGSMITH_TRACING' \
-                    --from-literal=LANGCHAIN_TRACING_V2='$LANGCHAIN_TRACING_V2' \
-                    --from-literal=LANGSMITH_ENDPOINT='$LANGSMITH_ENDPOINT' \
-                    --from-literal=LANGCHAIN_PROJECT='$LANGCHAIN_PROJECT' \
-                    --dry-run=client -o yaml | kubectl apply -f -"
+                
+                kubectl create secret generic aismb-secrets -n $(k8sNamespace) \
+                  --from-literal=GEMINI_API_KEY="$GEMINI_API_KEY" \
+                  --from-literal=GEMINI_TEMPERATURE="$GEMINI_TEMPERATURE" \
+                  --from-literal=NEO4J_URI="$NEO4J_URI" \
+                  --from-literal=NEO4J_USERNAME="$NEO4J_USERNAME" \
+                  --from-literal=NEO4J_PASSWORD="$NEO4J_PASSWORD" \
+                  --from-literal=NEO4J_DATABASE="$NEO4J_DATABASE" \
+                  --from-literal=AURA_INSTANCEID="$AURA_INSTANCEID" \
+                  --from-literal=AURA_INSTANCENAME="$AURA_INSTANCENAME" \
+                  --from-literal=DB_HOST="$DB_HOST" \
+                  --from-literal=DB_PORT="$DB_PORT" \
+                  --from-literal=DB_NAME="$DB_NAME" \
+                  --from-literal=DB_USER="$DB_USER" \
+                  --from-literal=DB_PASSWORD="$DB_PASSWORD" \
+                  --from-literal=PHONE_NUMBER_ID="$PHONE_NUMBER_ID" \
+                  --from-literal=WABA_ID="$WABA_ID" \
+                  --from-literal=ACCESS_TOKEN="$ACCESS_TOKEN" \
+                  --from-literal=VERIFY_TOKEN="$VERIFY_TOKEN" \
+                  --from-literal=WEBHOOK_SECRET="$WEBHOOK_SECRET" \
+                  --from-literal=LANGSMITH_API_KEY="$LANGSMITH_API_KEY" \
+                  --from-literal=LANGSMITH_TRACING="$LANGSMITH_TRACING" \
+                  --from-literal=LANGCHAIN_TRACING_V2="$LANGCHAIN_TRACING_V2" \
+                  --from-literal=LANGSMITH_ENDPOINT="$LANGSMITH_ENDPOINT" \
+                  --from-literal=LANGCHAIN_PROJECT="$LANGCHAIN_PROJECT" \
+                  --dry-run=client -o yaml | kubectl apply -f -
             env:
               GEMINI_API_KEY: $(GEMINI_API_KEY)
               GEMINI_TEMPERATURE: $(GEMINI_TEMPERATURE)
