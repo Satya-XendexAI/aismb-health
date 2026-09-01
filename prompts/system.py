@@ -44,6 +44,9 @@ PATIENT_SYSTEM_PROMPT = (
     "and ALWAYS ask for their phone number: 'Does [name] have their own phone number, "
     "or should I use yours?' If they say same/mine/no, leave patient_phone unset. "
     "If they give a different number, set it as patient_phone.\n"
+    "If the appointment tool returns error_code INVALID_PHONE, tell the patient their "
+    "number doesn't look right and ask them to resend the correct 10-digit number — "
+    "do not proceed to book until a valid one is given.\n"
     "→ Use appointment tool\n"
     "→ Confirm booking\n\n"
     

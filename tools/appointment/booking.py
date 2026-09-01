@@ -19,6 +19,15 @@ def _check_supported_mode(hospital) -> ErrorResult | None:
     return None
 
 
+def _normalize_phone(raw: str) -> str:
+    """Strip spaces, dashes, +, parentheses; drop a leading '91' country
+    code on a 12-digit number. Returns digits only — caller checks length."""
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) == 12 and digits.startswith("91"):
+        digits = digits[2:]
+    return digits
+
+
 def calculate_eta(session, doctor, patients_ahead):
     if session["started_at"] is not None:
         anchor_time = session["started_at"]
@@ -48,6 +57,16 @@ def book(conn, payload):
         return ErrorResult(status="ERROR", error_code="DOCTOR_NOT_FOUND",
                            message=f"Doctor {payload.doctor_id} not found or inactive.")
 
+    # Validate alternate contact number, if the family member has their own
+    patient_phone = payload.patient_phone
+    if patient_phone:
+        patient_phone = _normalize_phone(patient_phone)
+        if len(patient_phone) != 10:
+            return ErrorResult(
+                status="ERROR", error_code="INVALID_PHONE",
+                message=f"'{payload.patient_phone}' is not a valid 10-digit mobile number for {payload.patient_name}.",
+            )
+
     # Find or create patient (family-aware)
     patient = db.find_family_member(
         conn, payload.requester_phone, payload.hospital_id,
@@ -59,7 +78,7 @@ def book(conn, payload):
             hospital_id=payload.hospital_id,
             requester_phone=payload.requester_phone,
             name=payload.patient_name,
-            phone=payload.patient_phone or payload.requester_phone,
+            phone=patient_phone or payload.requester_phone,
             relation=payload.relation_to_requester,
             age=payload.patient_age,
             location=payload.patient_location,
