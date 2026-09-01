@@ -1,6 +1,7 @@
 from datetime import datetime, date, timedelta
 import tools.appointment.database as db
 from models.appointment import BookingConfirmation, CancellationResult, ErrorResult
+import psycopg2.errors
 
 SUPPORTED_BOOKING_MODE = "TOKEN"
 
@@ -80,15 +81,28 @@ def book(conn, payload):
             message=f"{patient['name']} already has token #{existing_token['token_number']} with this doctor.",
         )
 
-    # Create token
-    token = db.insert_token(
-        conn,
-        session_id=session["session_id"],
-        patient_id=patient["patient_id"],
-        doctor_id=payload.doctor_id,
-        hospital_id=payload.hospital_id,
-        department=payload.department,
-    )
+    # Create token — the SELECT-then-INSERT above has a race window between
+    # two near-simultaneous requests; the DB's unique index is the backstop.
+    with conn.cursor() as cur:
+        cur.execute("SAVEPOINT before_insert_token")
+    try:
+        token = db.insert_token(
+            conn,
+            session_id=session["session_id"],
+            patient_id=patient["patient_id"],
+            doctor_id=payload.doctor_id,
+            hospital_id=payload.hospital_id,
+            department=payload.department,
+        )
+    except psycopg2.errors.UniqueViolation as e:
+        if e.diag.constraint_name != "uq_tokens_waiting_patient_session":
+            raise
+        with conn.cursor() as cur:
+            cur.execute("ROLLBACK TO SAVEPOINT before_insert_token")
+        return ErrorResult(
+            status="ERROR", error_code="DUPLICATE_BOOKING",
+            message=f"{patient['name']} already has an active appointment with this doctor today.",
+        )
 
     # Mark patient as recently used
     db.touch_family_member(conn, patient["patient_id"])

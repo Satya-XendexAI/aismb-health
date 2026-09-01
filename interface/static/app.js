@@ -45,7 +45,7 @@ document.getElementById("customBtn").addEventListener("click", () => {
 function startSession(user) {
   currentUser = user;
   loginOverlay.style.display = "none";
-  phoneUI.style.display      = "block";
+  phoneUI.style.display      = "flex";
   roleBadge.textContent      = `${ROLE_ICON[user.role]} ${ROLE_LABEL[user.role]}`;
   roleBadge.style.background = ROLE_COLOR[user.role];
   textInput.focus();
