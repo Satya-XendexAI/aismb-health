@@ -36,12 +36,23 @@ driver = _make_driver()
 database = _DB
 
 # ── Gemini clients (OpenAI-compatible) ────────────────────────────────────────
-
+ 
 gemini_client = OpenAI(
     api_key=os.getenv("GEMINI_API_KEY", ""),
     base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    timeout=60.0,
 )
-
-embed_client  = gemini_client
+ 
+embed_client = OpenAI(
+    api_key=os.getenv("GEMINI_API_KEY", ""),
+    base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+    timeout=30.0,
+)
+ 
+# Warmup embedding client on import (avoids cold-start latency on first request)
+try:
+    embed_client.embeddings.create(input="warmup", model=os.getenv("GEMINI_EMBED_MODEL", "models/gemini-embedding-001"))
+except Exception:
+    pass
 EMBED_MODEL   = os.getenv("GEMINI_EMBED_MODEL", "models/gemini-embedding-001")
 PARSE_MODEL   = os.getenv("GEMINI_PARSE_MODEL", "models/gemini-3.5-flash-lite")

@@ -16,7 +16,12 @@ spec:
         app: aismb-whatsapp
     spec:
       nodeSelector:
-        kubernetes.azure.com/agentpool: agentpool
+        workload: whatsapp
+      tolerations:
+        - key: "workload"
+          operator: "Equal"
+          value: "whatsapp"
+          effect: "NoSchedule"
       containers:
         - name: aismb-whatsapp
           image: hsptlagnrgstry.azurecr.io/aismb-health:latest
@@ -32,11 +37,11 @@ spec:
               value: "8000"
           resources:
             requests:
-              cpu: 1500m
-              memory: 4Gi
+              cpu: "500m"
+              memory: "1Gi"
             limits:
-              cpu: "3"
-              memory: 10Gi
+              cpu: "1000m"
+              memory: "2Gi"
           startupProbe:
             tcpSocket:
               port: 8000

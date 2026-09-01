@@ -21,6 +21,8 @@ from orchestrator.tracing import traced, add_metadata
 logger = logging.getLogger(__name__)
 
 
+import os
+
 class WhatsAppOrchestrator:
     def __init__(
         self,
@@ -28,7 +30,7 @@ class WhatsAppOrchestrator:
         notifier,
         repository,
         fallback_text:     str = "I'm sorry, I couldn't process that. Please try again.",
-        max_iterations:    int = 5,
+        max_iterations:    int = int(os.getenv("MAX_ITERATIONS", "5")),
         max_history_turns: int = 10,
     ):
         self.llm               = llm
