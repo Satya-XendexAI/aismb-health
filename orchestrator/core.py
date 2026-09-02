@@ -145,7 +145,15 @@ class WhatsAppOrchestrator:
             self._responder("Understood. Your request has been cancelled.", context)
 
         else:
-            self._responder("Please reply *YES* to confirm or *NO* to cancel.", context)
+            # Not a plain yes/no — treat it as new information (e.g. a
+            # correction like "tomorrow instead") and let the LLM, which
+            # still has the pending request in its own history, reconsider
+            # rather than mechanically replaying a possibly-wrong tool call.
+            session.pending_tool = None
+            session.state        = SessionState.IDLE
+            session.history.append(ChatTurn(role=ChatRole.USER, content=wa_message.text))
+            system_prompt, tool_schemas = self._build_prompt_and_tools(wa_message, session)
+            self._react_loop(context, system_prompt, tool_schemas)
 
     def _build_prompt_and_tools(self, wa_message, session):
         if session.role == Role.ADMIN:

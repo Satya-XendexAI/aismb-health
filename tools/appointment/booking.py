@@ -1,6 +1,7 @@
 from datetime import datetime, date, timedelta
 import tools.appointment.database as db
 from models.appointment import BookingConfirmation, CancellationResult, ErrorResult
+import psycopg2.errors
 
 SUPPORTED_BOOKING_MODE = "TOKEN"
 
@@ -16,6 +17,15 @@ def _check_supported_mode(hospital) -> ErrorResult | None:
             ),
         )
     return None
+
+
+def _normalize_phone(raw: str) -> str:
+    """Strip spaces, dashes, +, parentheses; drop a leading '91' country
+    code on a 12-digit number. Returns digits only — caller checks length."""
+    digits = "".join(ch for ch in raw if ch.isdigit())
+    if len(digits) == 12 and digits.startswith("91"):
+        digits = digits[2:]
+    return digits
 
 
 def calculate_eta(session, doctor, patients_ahead):
@@ -47,18 +57,53 @@ def book(conn, payload):
         return ErrorResult(status="ERROR", error_code="DOCTOR_NOT_FOUND",
                            message=f"Doctor {payload.doctor_id} not found or inactive.")
 
+    # Validate date — never silently default to today; the patient must have
+    # been asked, and whatever they said must resolve to a real calendar date.
+    if not payload.date or not payload.date.strip():
+        return ErrorResult(status="ERROR", error_code="DATE_REQUIRED",
+                           message="No appointment date was given.")
+    try:
+        date.fromisoformat(payload.date.strip())
+    except ValueError:
+        return ErrorResult(status="ERROR", error_code="INVALID_DATE",
+                           message=f"'{payload.date}' is not a valid calendar date.")
+
+    # Validate alternate contact number, if the family member has their own
+    patient_phone = payload.patient_phone
+    if patient_phone:
+        patient_phone = _normalize_phone(patient_phone)
+        if len(patient_phone) != 10:
+            return ErrorResult(
+                status="ERROR", error_code="INVALID_PHONE",
+                message=f"'{payload.patient_phone}' is not a valid 10-digit mobile number for {payload.patient_name}.",
+            )
+
     # Find or create patient (family-aware)
     patient = db.find_family_member(
         conn, payload.requester_phone, payload.hospital_id,
         payload.patient_name, payload.relation_to_requester,
     )
+
+    # Self is identified by phone alone (see find_family_member) — if a
+    # different name than what's on file was given, don't silently create
+    # a second identity or rename the existing one. Ask for clarification.
+    relation_norm = (payload.relation_to_requester or "self").strip().lower()
+    if patient and relation_norm == "self" and patient["name"].strip().lower() != payload.patient_name.strip().lower():
+        return ErrorResult(
+            status="ERROR", error_code="NAME_MISMATCH",
+            message=(
+                f"This WhatsApp number already has a profile under the name "
+                f"'{patient['name']}', but this message says '{payload.patient_name}'."
+            ),
+        )
+
     if not patient:
         patient = db.insert_family_member(
             conn,
             hospital_id=payload.hospital_id,
             requester_phone=payload.requester_phone,
             name=payload.patient_name,
-            phone=payload.patient_phone or payload.requester_phone,
+            phone=patient_phone or payload.requester_phone,
             relation=payload.relation_to_requester,
             age=payload.patient_age,
             location=payload.patient_location,
@@ -80,15 +125,28 @@ def book(conn, payload):
             message=f"{patient['name']} already has token #{existing_token['token_number']} with this doctor.",
         )
 
-    # Create token
-    token = db.insert_token(
-        conn,
-        session_id=session["session_id"],
-        patient_id=patient["patient_id"],
-        doctor_id=payload.doctor_id,
-        hospital_id=payload.hospital_id,
-        department=payload.department,
-    )
+    # Create token — the SELECT-then-INSERT above has a race window between
+    # two near-simultaneous requests; the DB's unique index is the backstop.
+    with conn.cursor() as cur:
+        cur.execute("SAVEPOINT before_insert_token")
+    try:
+        token = db.insert_token(
+            conn,
+            session_id=session["session_id"],
+            patient_id=patient["patient_id"],
+            doctor_id=payload.doctor_id,
+            hospital_id=payload.hospital_id,
+            department=payload.department,
+        )
+    except psycopg2.errors.UniqueViolation as e:
+        if e.diag.constraint_name != "uq_tokens_waiting_patient_session":
+            raise
+        with conn.cursor() as cur:
+            cur.execute("ROLLBACK TO SAVEPOINT before_insert_token")
+        return ErrorResult(
+            status="ERROR", error_code="DUPLICATE_BOOKING",
+            message=f"{patient['name']} already has an active appointment with this doctor today.",
+        )
 
     # Mark patient as recently used
     db.touch_family_member(conn, patient["patient_id"])
