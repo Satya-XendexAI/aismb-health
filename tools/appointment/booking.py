@@ -57,6 +57,17 @@ def book(conn, payload):
         return ErrorResult(status="ERROR", error_code="DOCTOR_NOT_FOUND",
                            message=f"Doctor {payload.doctor_id} not found or inactive.")
 
+    # Validate date — never silently default to today; the patient must have
+    # been asked, and whatever they said must resolve to a real calendar date.
+    if not payload.date or not payload.date.strip():
+        return ErrorResult(status="ERROR", error_code="DATE_REQUIRED",
+                           message="No appointment date was given.")
+    try:
+        date.fromisoformat(payload.date.strip())
+    except ValueError:
+        return ErrorResult(status="ERROR", error_code="INVALID_DATE",
+                           message=f"'{payload.date}' is not a valid calendar date.")
+
     # Validate alternate contact number, if the family member has their own
     patient_phone = payload.patient_phone
     if patient_phone:
@@ -72,6 +83,20 @@ def book(conn, payload):
         conn, payload.requester_phone, payload.hospital_id,
         payload.patient_name, payload.relation_to_requester,
     )
+
+    # Self is identified by phone alone (see find_family_member) — if a
+    # different name than what's on file was given, don't silently create
+    # a second identity or rename the existing one. Ask for clarification.
+    relation_norm = (payload.relation_to_requester or "self").strip().lower()
+    if patient and relation_norm == "self" and patient["name"].strip().lower() != payload.patient_name.strip().lower():
+        return ErrorResult(
+            status="ERROR", error_code="NAME_MISMATCH",
+            message=(
+                f"This WhatsApp number already has a profile under the name "
+                f"'{patient['name']}', but this message says '{payload.patient_name}'."
+            ),
+        )
+
     if not patient:
         patient = db.insert_family_member(
             conn,

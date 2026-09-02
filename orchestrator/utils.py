@@ -9,12 +9,11 @@ def detect_booking_intent(text: str) -> bool:
 
 
 def is_affirmative(text: str) -> bool:
-    lowered = text.strip().lower()
-    return lowered in _AFFIRMATIVE or any(
-        kw in lowered for kw in {"yes", "book", "confirm", "go ahead", "proceed", "sure", "ok"}
-    )
+    """Exact match only — a longer reply that merely contains a word like
+    'book' or 'confirm' (e.g. 'book it for tomorrow instead') is NOT a plain
+    yes, it's new input that should go back through the LLM to be understood."""
+    return text.strip().lower() in _AFFIRMATIVE
 
 
 def is_negative(text: str) -> bool:
-    lowered = text.strip().lower()
-    return lowered in _NEGATIVE or any(kw in lowered for kw in {"no", "cancel", "stop", "don't"})
+    return text.strip().lower() in _NEGATIVE
