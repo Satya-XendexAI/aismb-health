@@ -147,6 +147,7 @@ def handle_audio_message(incoming: dict):
     try:
         audio_bytes = download_whatsapp_media(incoming["media_id"])
         transcript, language_code = transcribe_audio(audio_bytes, incoming["mime_type"])
+        print(f"  [Voice transcript] ({language_code}): {transcript!r}", flush=True)
 
         if not transcript.strip():
             text = translate_static(
