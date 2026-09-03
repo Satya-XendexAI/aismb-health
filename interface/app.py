@@ -17,7 +17,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from orchestrator import WhatsAppOrchestrator, InMemoryRepository, GeminiLLMAdapter, WAMessage
@@ -53,6 +53,15 @@ app = FastAPI(title="WhatsApp Interface (Local Test)")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+@app.middleware("http")
+async def no_cache_static(request, call_next):
+    """Local dev tool — always serve the latest static file, never a stale cached copy."""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 class ChatMessage(BaseModel):
     text:        str
     from_number: str
@@ -60,7 +69,14 @@ class ChatMessage(BaseModel):
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    # Version each static asset by its own mtime so the browser is forced to
+    # fetch a fresh copy whenever app.js/style.css actually change on disk —
+    # a stale cache can't match a URL it has never seen before.
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for asset in ("app.js", "style.css"):
+        version = int((STATIC_DIR / asset).stat().st_mtime)
+        html = html.replace(f"/static/{asset}\"", f"/static/{asset}?v={version}\"")
+    return HTMLResponse(html)
 
 
 @app.get("/api/config")

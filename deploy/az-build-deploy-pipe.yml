@@ -1,9 +1,8 @@
 # =============================================================================
 # Azure DevOps pipeline for aismb-health
 # Mirrors the reference pipeline structure (namespace + secrets + kubectl apply)
-# but builds the image in ACR first, then deploys the two apps:
+# but builds the image in ACR first, then deploys the WhatsApp app:
 #   - aismb-whatsapp  (whatsapp.py,        port 8000)
-#   - aismb-interface (interface/app.py,   port 8001)
 #
 # SETUP:
 #   1) Create an Azure Resource Manager service connection (azureSubscription).
@@ -13,6 +12,7 @@
 # =============================================================================
 trigger:
   - main
+pr: none
 
 variables:
   tag: 'latest'
@@ -29,13 +29,15 @@ variables:
   DB_PORT: '5432'
   DB_NAME: 'postgres'
 
-  # --- Secret variables MUST NOT be defined here (even as '') ------------------
-  # Pipeline YAML variables override variable-group / UI secret variables of the
-  # same name, so defining them as '' here would force them empty and clobber
-  # the real secrets. Set GEMINI_API_KEY, NEO4J_*, DB_USER, DB_PASSWORD,
-  # PHONE_NUMBER_ID, WABA_ID, ACCESS_TOKEN, VERIFY_TOKEN, WEBHOOK_SECRET as
-  # SECRET variables in the Azure DevOps UI (or a linked variable group).
-  # ---------------------------------------------------------------------------
+# --- Secret variables MUST NOT be defined here (even as '') ------------------
+# Pipeline YAML variables override variable-group / UI secret variables of the
+# same name, so defining them as '' here would force them empty and clobber
+# the real secrets. Set GEMINI_API_KEY, NEO4J_*, DB_USER, DB_PASSWORD,
+# PHONE_NUMBER_ID, WABA_ID, ACCESS_TOKEN, VERIFY_TOKEN, WEBHOOK_SECRET,
+# LANGSMITH_API_KEY, LANGSMITH_TRACING, LANGCHAIN_TRACING_V2, LANGSMITH_ENDPOINT,
+# LANGCHAIN_PROJECT as SECRET variables in the Azure DevOps
+# UI (or a linked variable group).
+# ---------------------------------------------------------------------------
 
 stages:
   - stage: Build
@@ -97,15 +99,17 @@ stages:
               scriptType: 'bash'
               scriptLocation: 'inlineScript'
               inlineScript: |
-                az aks command invoke \
-                  --resource-group $(aksResourceGroup) \
-                  --name $(aksName) \
-                  --command "kubectl create namespace $(k8sNamespace) --dry-run=client -o yaml | kubectl apply -f -"
-
+                set -euo pipefail
+                # Get AKS credentials
+                az aks get-credentials --resource-group $(aksResourceGroup) --name $(aksName) --overwrite-existing
+                
+                # Create namespace
+                kubectl create namespace $(k8sNamespace) --dry-run=client -o yaml | kubectl apply -f -
+                
                 # Recreate the secret from pipeline variables. Resolution MUST work:
                 # if any variable is empty the step fails loudly (no silent fallback
                 # to stale secrets). Secret values are never printed.
-                req_vars="GEMINI_API_KEY GEMINI_TEMPERATURE NEO4J_URI NEO4J_USERNAME NEO4J_PASSWORD NEO4J_DATABASE AURA_INSTANCEID AURA_INSTANCENAME DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD PHONE_NUMBER_ID WABA_ID ACCESS_TOKEN VERIFY_TOKEN WEBHOOK_SECRET"
+                req_vars="GEMINI_API_KEY GEMINI_TEMPERATURE NEO4J_URI NEO4J_USERNAME NEO4J_PASSWORD NEO4J_DATABASE AURA_INSTANCEID AURA_INSTANCENAME DB_HOST DB_PORT DB_NAME DB_USER DB_PASSWORD PHONE_NUMBER_ID WABA_ID ACCESS_TOKEN VERIFY_TOKEN WEBHOOK_SECRET LANGSMITH_API_KEY LANGSMITH_TRACING LANGCHAIN_TRACING_V2 LANGSMITH_ENDPOINT LANGCHAIN_PROJECT"
                 missing=0
                 echo "Secret variable presence check (values hidden):"
                 for v in $req_vars; do
@@ -116,29 +120,32 @@ stages:
                   echo "Fix the Azure DevOps variable definitions (exact names, scope/group linkage, and ensure no empty pipeline-level variable overrides the group value), then re-run."
                   exit 1
                 fi
-                az aks command invoke \
-                  --resource-group $(aksResourceGroup) \
-                  --name $(aksName) \
-                  --command "kubectl create secret generic aismb-secrets -n $(k8sNamespace) \
-                    --from-literal=GEMINI_API_KEY='$GEMINI_API_KEY' \
-                    --from-literal=GEMINI_TEMPERATURE='$GEMINI_TEMPERATURE' \
-                    --from-literal=NEO4J_URI='$NEO4J_URI' \
-                    --from-literal=NEO4J_USERNAME='$NEO4J_USERNAME' \
-                    --from-literal=NEO4J_PASSWORD='$NEO4J_PASSWORD' \
-                    --from-literal=NEO4J_DATABASE='$NEO4J_DATABASE' \
-                    --from-literal=AURA_INSTANCEID='$AURA_INSTANCEID' \
-                    --from-literal=AURA_INSTANCENAME='$AURA_INSTANCENAME' \
-                    --from-literal=DB_HOST='$DB_HOST' \
-                    --from-literal=DB_PORT='$DB_PORT' \
-                    --from-literal=DB_NAME='$DB_NAME' \
-                    --from-literal=DB_USER='$DB_USER' \
-                    --from-literal=DB_PASSWORD='$DB_PASSWORD' \
-                    --from-literal=PHONE_NUMBER_ID='$PHONE_NUMBER_ID' \
-                    --from-literal=WABA_ID='$WABA_ID' \
-                    --from-literal=ACCESS_TOKEN='$ACCESS_TOKEN' \
-                    --from-literal=VERIFY_TOKEN='$VERIFY_TOKEN' \
-                    --from-literal=WEBHOOK_SECRET='$WEBHOOK_SECRET' \
-                    --dry-run=client -o yaml | kubectl apply -f -"
+                
+                kubectl create secret generic aismb-secrets -n $(k8sNamespace) \
+                  --from-literal=GEMINI_API_KEY="$GEMINI_API_KEY" \
+                  --from-literal=GEMINI_TEMPERATURE="$GEMINI_TEMPERATURE" \
+                  --from-literal=NEO4J_URI="$NEO4J_URI" \
+                  --from-literal=NEO4J_USERNAME="$NEO4J_USERNAME" \
+                  --from-literal=NEO4J_PASSWORD="$NEO4J_PASSWORD" \
+                  --from-literal=NEO4J_DATABASE="$NEO4J_DATABASE" \
+                  --from-literal=AURA_INSTANCEID="$AURA_INSTANCEID" \
+                  --from-literal=AURA_INSTANCENAME="$AURA_INSTANCENAME" \
+                  --from-literal=DB_HOST="$DB_HOST" \
+                  --from-literal=DB_PORT="$DB_PORT" \
+                  --from-literal=DB_NAME="$DB_NAME" \
+                  --from-literal=DB_USER="$DB_USER" \
+                  --from-literal=DB_PASSWORD="$DB_PASSWORD" \
+                  --from-literal=PHONE_NUMBER_ID="$PHONE_NUMBER_ID" \
+                  --from-literal=WABA_ID="$WABA_ID" \
+                  --from-literal=ACCESS_TOKEN="$ACCESS_TOKEN" \
+                  --from-literal=VERIFY_TOKEN="$VERIFY_TOKEN" \
+                  --from-literal=WEBHOOK_SECRET="$WEBHOOK_SECRET" \
+                  --from-literal=LANGSMITH_API_KEY="$LANGSMITH_API_KEY" \
+                  --from-literal=LANGSMITH_TRACING="$LANGSMITH_TRACING" \
+                  --from-literal=LANGCHAIN_TRACING_V2="$LANGCHAIN_TRACING_V2" \
+                  --from-literal=LANGSMITH_ENDPOINT="$LANGSMITH_ENDPOINT" \
+                  --from-literal=LANGCHAIN_PROJECT="$LANGCHAIN_PROJECT" \
+                  --dry-run=client -o yaml | kubectl apply -f -
             env:
               GEMINI_API_KEY: $(GEMINI_API_KEY)
               GEMINI_TEMPERATURE: $(GEMINI_TEMPERATURE)
@@ -158,6 +165,11 @@ stages:
               ACCESS_TOKEN: $(ACCESS_TOKEN)
               VERIFY_TOKEN: $(VERIFY_TOKEN)
               WEBHOOK_SECRET: $(WEBHOOK_SECRET)
+              LANGSMITH_API_KEY: $(LANGSMITH_API_KEY)
+              LANGSMITH_TRACING: $(LANGSMITH_TRACING)
+              LANGCHAIN_TRACING_V2: $(LANGCHAIN_TRACING_V2)
+              LANGSMITH_ENDPOINT: $(LANGSMITH_ENDPOINT)
+              LANGCHAIN_PROJECT: $(LANGCHAIN_PROJECT)
 
           - task: AzureCLI@2
             displayName: 'Get AKS credentials and deploy'
@@ -174,8 +186,6 @@ stages:
                 kubectl apply -f $(System.ArtifactsDirectory)/manifests/namespace.yaml
                 kubectl apply -f $(System.ArtifactsDirectory)/manifests/whatsapp-deployment.yaml
                 kubectl apply -f $(System.ArtifactsDirectory)/manifests/whatsapp-service.yaml
-                kubectl apply -f $(System.ArtifactsDirectory)/manifests/interface-deployment.yaml
-                kubectl apply -f $(System.ArtifactsDirectory)/manifests/interface-service.yaml
                 kubectl apply -f $(System.ArtifactsDirectory)/manifests/hpa.yaml
                 kubectl apply -f $(System.ArtifactsDirectory)/manifests/pdb.yaml
                 kubectl apply -f $(System.ArtifactsDirectory)/manifests/ingress.yaml
@@ -183,8 +193,7 @@ stages:
                 # Force a rolling restart so the newly built :latest image (and any
                 # updated secrets/env) go live immediately. This intentionally wipes
                 # the in-memory session state on each deploy.
-                kubectl rollout restart deployment/aismb-interface deployment/aismb-whatsapp -n $(k8sNamespace)
-                kubectl rollout status deployment/aismb-interface -n $(k8sNamespace) --timeout=180s
+                kubectl rollout restart deployment/aismb-whatsapp -n $(k8sNamespace)
                 kubectl rollout status deployment/aismb-whatsapp -n $(k8sNamespace) --timeout=180s
 
           - task: AzureCLI@2
@@ -197,4 +206,4 @@ stages:
                 kubectl get svc -n $(k8sNamespace)
                 echo "If EXTERNAL-IP is <pending>, wait and re-run: kubectl get svc -n $(k8sNamespace)"
                 kubectl get ingress -n $(k8sNamespace)
-                echo "Ingress ADDRESS is the single HTTPS endpoint for both apps. Create the TLS secret 'aismb-tls' (kubectl create secret tls aismb-tls --cert=.. --key=..) and point DNS at the address."
+                echo "Ingress ADDRESS is the single HTTPS endpoint for the WhatsApp webhook. Create the TLS secret 'aismb-tls' (kubectl create secret tls aismb-tls --cert=.. --key=..) and point DNS at the address."

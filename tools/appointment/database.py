@@ -52,17 +52,22 @@ def get_doctor(conn, doctor_id, hospital_id):
 
 
 def find_family_member(conn, requester_phone, hospital_id, patient_name, relation=None):
-    """Find a patient by requester phone + name (+ optional relation)."""
-    conditions = [
-        "requested_by_phone = %s",
-        "hospital_id = %s",
-        "LOWER(name) = LOWER(%s)",
-    ]
-    params = [requester_phone, str(hospital_id), patient_name.strip()]
+    """Find a patient by requester phone (+ name/relation for family members).
 
-    if relation and relation.strip().lower() != "self":
-        conditions.append("LOWER(relation_to_requester) = LOWER(%s)")
-        params.append(relation.strip())
+    The phone number is the stable identity for 'self' — name is just an
+    editable attribute, so a differently-stated name never creates a second
+    self-record; the caller compares the returned name against what was
+    given to detect a mismatch. Family members are still looked up by name
+    + relation, since one phone can legitimately have several of those."""
+    relation_norm = (relation or "self").strip().lower()
+    conditions = ["requested_by_phone = %s", "hospital_id = %s"]
+    params = [requester_phone, str(hospital_id)]
+
+    if relation_norm == "self":
+        conditions.append("LOWER(relation_to_requester) = 'self'")
+    else:
+        conditions += ["LOWER(name) = LOWER(%s)", "LOWER(relation_to_requester) = LOWER(%s)"]
+        params += [patient_name.strip(), relation_norm]
 
     sql = f"""
         SELECT patient_id, hospital_id, name, phone, age, location, diagnosis,
@@ -79,27 +84,34 @@ def find_family_member(conn, requester_phone, hospital_id, patient_name, relatio
 
 def insert_family_member(conn, hospital_id, requester_phone, name, phone,
                          relation, age=None, location=None, diagnosis=None):
-    """Insert a new family member. Uses ON CONFLICT for safe re-delivery."""
-    # Must match the live unique index exactly (columns + partial WHERE) or
-    # Postgres rejects the ON CONFLICT with "no unique or exclusion constraint
-    # matching the ON CONFLICT specification". The index only covers family
-    # members (relation != 'self') — self-bookings are deduped upstream by
-    # find_family_member() instead, so they never hit this arbiter.
-    sql = """
+    """Insert a new family member. Uses ON CONFLICT for safe re-delivery —
+    'self' and family members are protected by two separate partial unique
+    indexes (see migrations/0003), so the conflict target depends on which
+    kind of record this is."""
+    relation_norm = (relation or "self").strip().lower()
+    if relation_norm == "self":
+        conflict_clause = (
+            "ON CONFLICT (hospital_id, requested_by_phone) "
+            "WHERE LOWER(relation_to_requester) = 'self' DO NOTHING"
+        )
+    else:
+        conflict_clause = (
+            "ON CONFLICT (hospital_id, requested_by_phone, (LOWER(name)), (LOWER(relation_to_requester))) "
+            "WHERE LOWER(relation_to_requester) <> 'self' DO NOTHING"
+        )
+    sql = f"""
         INSERT INTO patients
             (hospital_id, name, phone, age, location, diagnosis,
              requested_by_phone, relation_to_requester)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (hospital_id, requested_by_phone, (LOWER(name)), (LOWER(relation_to_requester)))
-            WHERE LOWER(relation_to_requester) <> 'self'
-            DO NOTHING
+        {conflict_clause}
         RETURNING patient_id, hospital_id, name, phone, age, location, diagnosis,
                   requested_by_phone, relation_to_requester
     """
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute(sql, (
             str(hospital_id), name.strip(), phone, age, location, diagnosis,
-            requester_phone.strip(), (relation or "self").strip().lower(),
+            requester_phone.strip(), relation_norm,
         ))
         row = cur.fetchone()
         if row is None:

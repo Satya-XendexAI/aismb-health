@@ -2,18 +2,18 @@ _BOOKING_KEYWORDS = {"book", "appointment", "cancel", "token", "schedule", "regi
 _AFFIRMATIVE      = {"yes", "y", "ok", "okay", "sure", "book", "confirm", "go ahead", "proceed", "yeah", "yep", "do it"}
 _NEGATIVE         = {"no", "n", "cancel", "stop", "nope", "never mind", "nevermind", "nah", "don't"}
 
-# Words safe to match as a *substring* of a longer transcript (unlike "y"/"n",
-# which are only checked for an exact whole-message match above — matching
-# those as substrings would false-positive on words like "any" or "not").
+# Short non-English yes/no words, safe to match as a *substring* of a longer
+# transcript — unlike the English words above (checked only via exact match
+# in _AFFIRMATIVE/_NEGATIVE, since e.g. "book" or "confirm" as a substring
+# would false-positive on a longer reply like "book it for tomorrow instead",
+# which is new input, not a plain yes).
 _AFFIRMATIVE_SUBSTR = {
-    "yes", "book", "confirm", "go ahead", "proceed", "sure", "ok",
     "avunu", "అవును", "సరే",                       # Telugu: yes / ok
     "haan", "han", "हाँ", "हां", "ठीक है", "ठीक",     # Hindi: yes / ok
     "aam", "ஆம்", "சரி",                            # Tamil: yes / ok
     "haudu", "ಹೌದు", "ಸರಿ",                          # Kannada: yes / ok
 }
 _NEGATIVE_SUBSTR = {
-    "no", "cancel", "stop", "don't",
     "vaddu", "వద్దు", "కాదు",                        # Telugu: no / don't want
     "nahi", "nahin", "नहीं",                          # Hindi: no
     "illai", "இல்லை",                                # Tamil: no
@@ -27,6 +27,11 @@ def detect_booking_intent(text: str) -> bool:
 
 
 def is_affirmative(text: str) -> bool:
+    """Exact match for English (a longer reply that merely contains 'book' or
+    'confirm', e.g. 'book it for tomorrow instead', is NOT a plain yes — it's
+    new input that should go back through the LLM). Non-English yes/no words
+    are still matched as a substring since they won't appear inside unrelated
+    English sentences."""
     lowered = text.strip().lower()
     return lowered in _AFFIRMATIVE or any(kw in lowered for kw in _AFFIRMATIVE_SUBSTR)
 

@@ -19,6 +19,7 @@ import psycopg2.extras
 from openai import OpenAI
 from dotenv import load_dotenv
 from prompts.query_data import sql_generate, sql_validate, ADMIN_TABLES
+from orchestrator.tracing import traced, record_usage
 
 load_dotenv()
 
@@ -96,6 +97,7 @@ def _serialize_row(row: dict) -> dict:
     return result
 
 
+@traced("query_data._run", run_type="chain", tags=["sql", "llm"])
 def _run(question: str, tables: list, bind_param: str, bind_value: str,
          extra_rules: list[str] | None = None) -> dict:
     """
@@ -124,6 +126,7 @@ def _run(question: str, tables: list, bind_param: str, bind_value: str,
                 temperature=0.0,
                 max_tokens=512,
             )
+            record_usage(resp, model=_SMALL_MODEL)
             sql = resp.choices[0].message.content or ""
             sql = re.sub(r"^```[a-z]*\n?", "", sql.strip(), flags=re.IGNORECASE)
             sql = re.sub(r"\n?```$", "", sql.strip())
@@ -140,6 +143,7 @@ def _run(question: str, tables: list, bind_param: str, bind_value: str,
                 temperature=0.0,
                 max_tokens=512,
             )
+            record_usage(v_resp, model=_SMALL_MODEL)
             validated = v_resp.choices[0].message.content or sql
             validated = re.sub(r"^```[a-z]*\n?", "", validated.strip(), flags=re.IGNORECASE)
             validated = re.sub(r"\n?```$", "", validated.strip())

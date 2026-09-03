@@ -1,6 +1,6 @@
 from unittest.mock import MagicMock, patch
 
-from models.session import Session, SessionState, Role, ToolCall, WAMessage
+from models.session import Session, SessionState, Role, ToolCall, WAMessage, AgentResponse, AgentResponseType
 from orchestrator.core import WhatsAppOrchestrator
 
 
@@ -74,20 +74,29 @@ def _session_awaiting_confirm(language_code):
     )
 
 
-def test_confirm_gate_translates_unrecognized_reply_prompt():
+def test_confirm_gate_reconsiders_unrecognized_reply_via_llm():
+    """A reply that's neither a plain yes nor no (e.g. a correction like
+    'maybe later') is treated as new information: the pending tool is
+    dropped and the LLM re-engages with it in history, rather than the
+    session being stuck re-asking a static YES/NO prompt."""
     session = _session_awaiting_confirm("te-IN")
     repository = MagicMock()
     repository.get_session.return_value = session
 
-    notifier     = MagicMock()
-    orchestrator = WhatsAppOrchestrator(llm=MagicMock(), notifier=notifier, repository=repository)
+    notifier = MagicMock()
+    llm = MagicMock()
+    llm.run_agent.return_value = AgentResponse(
+        type=AgentResponseType.TEXT, text="Sure, when would you like to reschedule?",
+    )
+    orchestrator = WhatsAppOrchestrator(llm=llm, notifier=notifier, repository=repository)
 
-    with patch("orchestrator.core.translate_static", return_value="translated yes/no prompt") as mock_translate:
-        wa_message = WAMessage(from_number="919876543210", message_id="m1", text="maybe later", hospital_id="glngs-chn")
-        orchestrator.handle_message(wa_message)
+    wa_message = WAMessage(from_number="919876543210", message_id="m1", text="maybe later", hospital_id="glngs-chn")
+    orchestrator.handle_message(wa_message)
 
-    mock_translate.assert_called_once_with(orchestrator.llm, "Please reply *YES* to confirm or *NO* to cancel.", "te-IN")
-    notifier.send.assert_called_once_with("919876543210", "translated yes/no prompt")
+    assert session.pending_tool is None
+    assert session.state == SessionState.IDLE
+    llm.run_agent.assert_called_once()
+    notifier.send.assert_called_once_with("919876543210", "Sure, when would you like to reschedule?")
 
 
 def test_confirm_gate_translates_negative_reply_message():

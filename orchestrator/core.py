@@ -17,9 +17,12 @@ from orchestrator.formatters import format_booking_result, chunk_text
 from orchestrator.llm import translate_static, translate_labels, normalize_to_english
 from orchestrator import gates
 from prompts.system import PATIENT_SYSTEM_PROMPT, DOCTOR_SYSTEM_PROMPT, ADMIN_SYSTEM_PROMPT
+from orchestrator.tracing import traced, add_metadata
 
 logger = logging.getLogger(__name__)
 
+
+import os
 
 class WhatsAppOrchestrator:
     def __init__(
@@ -28,7 +31,7 @@ class WhatsAppOrchestrator:
         notifier,
         repository,
         fallback_text:     str = "I'm sorry, I couldn't process that. Please try again.",
-        max_iterations:    int = 5,
+        max_iterations:    int = int(os.getenv("MAX_ITERATIONS", "5")),
         max_history_turns: int = 10,
     ):
         self.llm               = llm
@@ -38,7 +41,12 @@ class WhatsAppOrchestrator:
         self.max_iterations    = max_iterations
         self.max_history_turns = max_history_turns
 
+    @traced("WhatsAppOrchestrator.handle_message", run_type="chain", tags=["orchestrator", "agent"])
     def handle_message(self, wa_message: WAMessage):
+        add_metadata(
+            hospital_id=wa_message.hospital_id,
+            from_number=wa_message.from_number,
+        )
         try:
             self._handle_message_inner(wa_message)
         except Exception as exc:
@@ -56,6 +64,7 @@ class WhatsAppOrchestrator:
     def _handle_message_inner(self, wa_message: WAMessage):
         context = self._hydrate(wa_message)
         session = context.session
+        add_metadata(role=session.role.value, state=session.state.value)
 
         if session.state == SessionState.AWAITING_CONFIRM:
             self._handle_awaiting_confirm(wa_message, context)
@@ -152,10 +161,15 @@ class WhatsAppOrchestrator:
             )
 
         else:
-            self._responder(
-                translate_static(self.llm, "Please reply *YES* to confirm or *NO* to cancel.", session.language_code),
-                context,
-            )
+            # Not a plain yes/no — treat it as new information (e.g. a
+            # correction like "tomorrow instead") and let the LLM, which
+            # still has the pending request in its own history, reconsider
+            # rather than mechanically replaying a possibly-wrong tool call.
+            session.pending_tool = None
+            session.state        = SessionState.IDLE
+            session.history.append(ChatTurn(role=ChatRole.USER, content=wa_message.text))
+            system_prompt, tool_schemas = self._build_prompt_and_tools(wa_message, session)
+            self._react_loop(context, system_prompt, tool_schemas)
 
     def _build_prompt_and_tools(self, wa_message, session):
         if session.role == Role.ADMIN:
@@ -311,6 +325,7 @@ class WhatsAppOrchestrator:
             if tool_call.args.get(field):
                 tool_call.args[field] = normalize_to_english(self.llm, tool_call.args[field])
 
+    @traced("orchestrator._gate", run_type="chain", tags=["gate"])
     def _gate(self, tool_call, context: OrchestratorContext) -> GateResult:
         allowed = ROLE_PERMISSIONS.get(tool_call.tool_name, {Role.PATIENT, Role.DOCTOR})
         if context.session.role not in allowed:
@@ -319,6 +334,7 @@ class WhatsAppOrchestrator:
             return GateResult(GateStatus.CONFIRM_REQUIRED)
         return GateResult(GateStatus.OK)
 
+    @traced("orchestrator._execute_tool", run_type="tool", tags=["tool"])
     def _execute_tool(self, tool_call, context: OrchestratorContext) -> dict:
         name = tool_call.tool_name
         if name == "appointment":
@@ -375,6 +391,7 @@ class WhatsAppOrchestrator:
                     logger.error("LLM error: %s", exc)
                     return None
 
+    @traced("orchestrator._responder", run_type="chain", tags=["responder"])
     def _responder(self, text: str, context: OrchestratorContext):
         for chunk in chunk_text(text, max_chars=1000):
             try:

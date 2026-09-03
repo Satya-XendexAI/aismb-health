@@ -10,6 +10,7 @@ from models.session import (
     ChatTurn, ChatRole, AgentResponse, AgentResponseType, ToolCall,
 )
 from prompts.system import PATIENT_SYSTEM_PROMPT
+from orchestrator.tracing import traced, add_metadata, record_usage
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -257,7 +258,9 @@ class GeminiLLMAdapter:
         self.model  = model
         self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=120.0)
 
+    @traced("GeminiLLMAdapter.run_agent", run_type="llm")
     def run_agent(self, history: List[ChatTurn], tool_schemas: list, system_prompt: str = PATIENT_SYSTEM_PROMPT) -> AgentResponse:
+        add_metadata(model=self.model)
         messages = [{"role": "system", "content": system_prompt}] + self._build_messages(history)
 
         completion = self.client.chat.completions.create(
@@ -273,6 +276,7 @@ class GeminiLLMAdapter:
         choice        = completion.choices[0]
         finish_reason = choice.finish_reason
         message       = choice.message
+        self._record_usage(completion)
 
 
         if finish_reason == "tool_calls" and message.tool_calls:
@@ -294,6 +298,13 @@ class GeminiLLMAdapter:
             text = "Sorry, I'm having trouble with that — could you rephrase or try again?"
 
         return AgentResponse(type=AgentResponseType.TEXT, text=text)
+
+    def _record_usage(self, completion):
+        """Push token usage + cost onto the active LangSmith run.
+
+        Raw OpenAI clients don't populate usage automatically; record_usage
+        writes it to run.metadata["usage_metadata"] so LangSmith computes tokens and cost."""
+        record_usage(completion, model=self.model)
 
     def _build_messages(self, history: List[ChatTurn]) -> list:
         messages = []
