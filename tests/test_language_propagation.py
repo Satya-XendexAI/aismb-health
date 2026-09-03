@@ -78,7 +78,9 @@ def test_confirm_gate_reconsiders_unrecognized_reply_via_llm():
     """A reply that's neither a plain yes nor no (e.g. a correction like
     'maybe later') is treated as new information: the pending tool is
     dropped and the LLM re-engages with it in history, rather than the
-    session being stuck re-asking a static YES/NO prompt."""
+    session being stuck re-asking a static YES/NO prompt. The LLM's reply
+    here is plain English even though the session is in Telugu — the
+    language safety net should catch and translate it before it's sent."""
     session = _session_awaiting_confirm("te-IN")
     repository = MagicMock()
     repository.get_session.return_value = session
@@ -90,13 +92,15 @@ def test_confirm_gate_reconsiders_unrecognized_reply_via_llm():
     )
     orchestrator = WhatsAppOrchestrator(llm=llm, notifier=notifier, repository=repository)
 
-    wa_message = WAMessage(from_number="919876543210", message_id="m1", text="maybe later", hospital_id="glngs-chn")
-    orchestrator.handle_message(wa_message)
+    with patch("orchestrator.core.translate_text", return_value="మీరు ఎప్పుడు రీషెడ్యూల్ చేయాలనుకుంటున్నారు?") as mock_translate:
+        wa_message = WAMessage(from_number="919876543210", message_id="m1", text="maybe later", hospital_id="glngs-chn")
+        orchestrator.handle_message(wa_message)
 
     assert session.pending_tool is None
     assert session.state == SessionState.IDLE
     llm.run_agent.assert_called_once()
-    notifier.send.assert_called_once_with("919876543210", "Sure, when would you like to reschedule?")
+    mock_translate.assert_called_once_with(orchestrator.llm, "Sure, when would you like to reschedule?", "te-IN")
+    notifier.send.assert_called_once_with("919876543210", "మీరు ఎప్పుడు రీషెడ్యూల్ చేయాలనుకుంటున్నారు?")
 
 
 def test_confirm_gate_translates_negative_reply_message():

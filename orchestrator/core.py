@@ -12,9 +12,9 @@ from models.session import (
 from orchestrator.schemas import (
     PATIENT_TOOLS, PATIENT_TOOLS_WARMUP, DOCTOR_TOOLS, ADMIN_TOOLS, ROLE_PERMISSIONS,
 )
-from orchestrator.utils import detect_booking_intent, is_affirmative, is_negative
+from orchestrator.utils import detect_booking_intent, is_affirmative, is_negative, looks_like_english
 from orchestrator.formatters import format_booking_result, chunk_text
-from orchestrator.llm import translate_static, translate_labels, normalize_to_english
+from orchestrator.llm import translate_static, translate_text, translate_labels, normalize_to_english
 from orchestrator import gates
 from prompts.system import PATIENT_SYSTEM_PROMPT, DOCTOR_SYSTEM_PROMPT, ADMIN_SYSTEM_PROMPT
 from orchestrator.tracing import traced, add_metadata
@@ -140,10 +140,7 @@ class WhatsAppOrchestrator:
                 self._responder(msg, context)
                 return
             if tool_call.tool_name == "appointment":
-                if result.get("action") in ("BOOK", "CANCEL"):
-                    session.memory_loaded = False
-                labels    = translate_labels(self.llm, session.language_code)
-                formatted = format_booking_result(result, tool_call.args, labels)
+                formatted = self._format_appointment_response(result, tool_call.args, session)
                 if formatted:
                     self._responder(formatted, context)
                     return
@@ -152,8 +149,8 @@ class WhatsAppOrchestrator:
             self._react_loop(context, system_prompt, tool_schemas)
 
         elif text_is_negative:
-            session.pending_tool = None
-            session.state        = SessionState.IDLE
+            self._resolve_pending_tool_as_not_executed(session, "Cancelled — the patient declined.")
+            session.state = SessionState.IDLE
             session.history.append(ChatTurn(role=ChatRole.USER, content=wa_message.text))
             self._responder(
                 translate_static(self.llm, "Understood. Your request has been cancelled.", session.language_code),
@@ -165,8 +162,10 @@ class WhatsAppOrchestrator:
             # correction like "tomorrow instead") and let the LLM, which
             # still has the pending request in its own history, reconsider
             # rather than mechanically replaying a possibly-wrong tool call.
-            session.pending_tool = None
-            session.state        = SessionState.IDLE
+            self._resolve_pending_tool_as_not_executed(
+                session, "Not executed — the patient replied with something other than a plain yes/no."
+            )
+            session.state = SessionState.IDLE
             session.history.append(ChatTurn(role=ChatRole.USER, content=wa_message.text))
             system_prompt, tool_schemas = self._build_prompt_and_tools(wa_message, session)
             self._react_loop(context, system_prompt, tool_schemas)
@@ -218,6 +217,14 @@ class WhatsAppOrchestrator:
             if agent_response.type == AgentResponseType.TEXT:
                 final_text = agent_response.text
                 needs_translation = False
+                # The system prompt asks the model to always reply in the
+                # patient's language, but that's a soft instruction it can
+                # (and occasionally does) ignore — catch a plain-English
+                # reply in a non-English session and translate it ourselves
+                # rather than letting it slip through untranslated.
+                lang_prefix = (session.language_code or "en").split("-")[0].lower()
+                if lang_prefix != "en" and looks_like_english(final_text):
+                    final_text = translate_text(self.llm, final_text, session.language_code)
                 break
 
             session.history.append(ChatTurn(
@@ -276,10 +283,7 @@ class WhatsAppOrchestrator:
                     kg_empty_streak = 0
 
             if agent_response.tool_call.tool_name == "appointment":
-                if result.get("action") in ("BOOK", "CANCEL"):
-                    session.memory_loaded = False
-                labels    = translate_labels(self.llm, session.language_code)
-                formatted = format_booking_result(result, agent_response.tool_call.args, labels)
+                formatted = self._format_appointment_response(result, agent_response.tool_call.args, session)
                 if formatted:
                     final_text = formatted
                     needs_translation = False
@@ -316,6 +320,38 @@ class WhatsAppOrchestrator:
             logger.warning("memory preload failed: %s", exc)
             session.memory_loaded = True
 
+    def _resolve_pending_tool_as_not_executed(self, session, reason: str):
+        """Close out session.pending_tool with an explicit NOT_EXECUTED result
+        instead of just dropping it.
+
+        The tool call was already written into session.history as an
+        unpaired assistant tool-call turn back when _react_loop first
+        proposed it (before the confirm-gate deferred it) — see
+        _react_loop's history.append() right before the CONFIRM_REQUIRED
+        check. If we clear pending_tool without ever resolving that turn,
+        the next LLM call sees its own "I'm calling book()" turn with no
+        result and, left to guess, tends to assume it succeeded and
+        narrates a fabricated confirmation instead of a real one — nothing
+        gets written to the database, but the patient is told it was
+        booked. Appending this turn keeps the tool-call/tool-result pairing
+        intact and tells the model explicitly that nothing happened.
+
+        Only safe for "appointment": interrupt_tool() (gates.py) hands
+        pending_tool the *same* ToolCall object the LLM proposed, so its
+        tool_use_id matches the dangling history turn. report_delay's
+        pending_tool (built fresh in interrupt_delay() with a new random
+        tool_use_id) does NOT match its original history turn, so
+        resolving it here would append an orphaned tool-result the API
+        would reject — for that case we fall back to the old plain clear."""
+        tool_call = session.pending_tool
+        session.pending_tool = None
+        if tool_call and tool_call.tool_name == "appointment":
+            session.history.append(ChatTurn(
+                role=ChatRole.TOOL_RESULT,
+                content=json.dumps({"status": "NOT_EXECUTED", "reason": reason}),
+                tool_call=tool_call,
+            ))
+
     def _normalize_appointment_args(self, tool_call):
         """Store/lookup patient data in English regardless of what language it
         was spoken in — keeps hospital records consistent and lets
@@ -324,6 +360,29 @@ class WhatsAppOrchestrator:
         for field in ("patient_name", "patient_location", "symptoms"):
             if tool_call.args.get(field):
                 tool_call.args[field] = normalize_to_english(self.llm, tool_call.args[field])
+
+    def _format_appointment_response(self, result: dict, tool_args: dict, session) -> str | None:
+        """Render a confirmation card for a successful booking or cancellation,
+        translated into the session's language. Returns None for any other
+        outcome (errors, etc.) so the caller lets the LLM narrate it instead.
+
+        Both BOOK and CANCEL go through here so neither one falls back to the
+        LLM freely summarizing raw tool JSON itself — that fallback isn't
+        guaranteed to include every field (hospital, fee, reporting time) or
+        to stay in the patient's language."""
+        if result.get("action") in ("BOOK", "CANCEL"):
+            session.memory_loaded = False
+
+        labels    = translate_labels(self.llm, session.language_code)
+        formatted = format_booking_result(result, tool_args, labels)
+        if formatted:
+            return formatted
+
+        booking = result.get("result", {})
+        if result.get("action") == "CANCEL" and booking.get("status") == "CANCELLED":
+            return translate_text(self.llm, booking["message"], session.language_code)
+
+        return None
 
     @traced("orchestrator._gate", run_type="chain", tags=["gate"])
     def _gate(self, tool_call, context: OrchestratorContext) -> GateResult:

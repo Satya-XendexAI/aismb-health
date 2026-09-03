@@ -1,3 +1,5 @@
+import re
+
 _BOOKING_KEYWORDS = {"book", "appointment", "cancel", "token", "schedule", "register", "slot"}
 _AFFIRMATIVE      = {"yes", "y", "ok", "okay", "sure", "book", "confirm", "go ahead", "proceed", "yeah", "yep", "do it"}
 _NEGATIVE         = {"no", "n", "cancel", "stop", "nope", "never mind", "nevermind", "nah", "don't"}
@@ -26,16 +28,39 @@ def detect_booking_intent(text: str) -> bool:
     return any(kw in lowered for kw in _BOOKING_KEYWORDS)
 
 
+# Speech-to-text transcripts (unlike typed replies) routinely add terminal
+# punctuation to a one-word answer — "yes" comes back as "Yes." or "Yes!".
+# Strip that before the exact-match check, or a spoken "yes" silently misses
+# _AFFIRMATIVE and falls through to the ambiguous-reply path.
+_TRAILING_PUNCT_RE = re.compile(r"[.,!?;:।]+$")
+
+
+def _normalize_reply(text: str) -> str:
+    return _TRAILING_PUNCT_RE.sub("", text.strip()).strip().lower()
+
+
 def is_affirmative(text: str) -> bool:
     """Exact match for English (a longer reply that merely contains 'book' or
     'confirm', e.g. 'book it for tomorrow instead', is NOT a plain yes — it's
     new input that should go back through the LLM). Non-English yes/no words
     are still matched as a substring since they won't appear inside unrelated
     English sentences."""
-    lowered = text.strip().lower()
+    lowered = _normalize_reply(text)
     return lowered in _AFFIRMATIVE or any(kw in lowered for kw in _AFFIRMATIVE_SUBSTR)
 
 
 def is_negative(text: str) -> bool:
-    lowered = text.strip().lower()
+    lowered = _normalize_reply(text)
     return lowered in _NEGATIVE or any(kw in lowered for kw in _NEGATIVE_SUBSTR)
+
+
+def looks_like_english(text: str) -> bool:
+    """Heuristic: true if text has no non-ASCII characters, i.e. it's plain
+    Latin-script English rather than one of the supported Indian-language
+    scripts (Telugu/Hindi/Tamil/Kannada all use non-ASCII code points).
+
+    Used to catch an LLM reply that slipped into English despite the
+    session being in another language — the system prompt asks the model to
+    always match the patient's language, but that's a soft instruction, not
+    a guarantee."""
+    return text.isascii()
