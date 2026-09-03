@@ -11,16 +11,22 @@ Usage (run from the project root):
 """
 
 import json
+import logging
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from orchestrator import WhatsAppOrchestrator, InMemoryRepository, GeminiLLMAdapter, WAMessage
 from interface.notifier import CaptureNotifier
+from whatsapp import transcribe_audio
+from orchestrator.llm import translate_static
+
+logging.basicConfig(level=logging.ERROR, format="%(name)s %(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 HOSPITAL_ID = "glngs-chn"
 STATIC_DIR  = Path(__file__).parent / "static"
@@ -93,6 +99,38 @@ def send_message(message: ChatMessage):
         message_id=str(uuid.uuid4()),
         text=message.text,
         hospital_id=HOSPITAL_ID,
+    )
+    orchestrator.handle_message(wa_message)
+    return {"replies": notifier.drain()}
+
+
+@app.post("/api/send-audio")
+async def send_audio_message(from_number: str = Form(...), audio: UploadFile = File(...)):
+    from_number = from_number.strip()
+    if not from_number:
+        raise HTTPException(status_code=400, detail="from_number is required")
+
+    audio_bytes = await audio.read()
+    try:
+        transcript, language_code = transcribe_audio(audio_bytes, audio.content_type or "audio/webm")
+    except Exception as exc:
+        logger.error("Voice message transcription failed: %s", exc)
+        return {"replies": ["Sorry, something went wrong processing your voice note. Please try typing instead."]}
+
+    if not transcript.strip():
+        text = translate_static(
+            orchestrator.llm,
+            "Sorry, I couldn't understand that voice note — could you type your message instead?",
+            language_code,
+        )
+        return {"replies": [text]}
+
+    wa_message = WAMessage(
+        from_number=from_number,
+        message_id=str(uuid.uuid4()),
+        text=transcript,
+        hospital_id=HOSPITAL_ID,
+        language_code=language_code,
     )
     orchestrator.handle_message(wa_message)
     return {"replies": notifier.drain()}
