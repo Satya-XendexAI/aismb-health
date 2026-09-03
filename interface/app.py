@@ -11,16 +11,22 @@ Usage (run from the project root):
 """
 
 import json
+import logging
 import uuid
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
 from orchestrator import WhatsAppOrchestrator, InMemoryRepository, GeminiLLMAdapter, WAMessage
 from interface.notifier import CaptureNotifier
+from whatsapp import transcribe_audio
+from orchestrator.llm import translate_static
+
+logging.basicConfig(level=logging.ERROR, format="%(name)s %(levelname)s: %(message)s")
+logger = logging.getLogger(__name__)
 
 HOSPITAL_ID = "glngs-chn"
 STATIC_DIR  = Path(__file__).parent / "static"
@@ -47,6 +53,15 @@ app = FastAPI(title="WhatsApp Interface (Local Test)")
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
+@app.middleware("http")
+async def no_cache_static(request, call_next):
+    """Local dev tool — always serve the latest static file, never a stale cached copy."""
+    response = await call_next(request)
+    if request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 class ChatMessage(BaseModel):
     text:        str
     from_number: str
@@ -54,7 +69,14 @@ class ChatMessage(BaseModel):
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC_DIR / "index.html")
+    # Version each static asset by its own mtime so the browser is forced to
+    # fetch a fresh copy whenever app.js/style.css actually change on disk —
+    # a stale cache can't match a URL it has never seen before.
+    html = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    for asset in ("app.js", "style.css"):
+        version = int((STATIC_DIR / asset).stat().st_mtime)
+        html = html.replace(f"/static/{asset}\"", f"/static/{asset}?v={version}\"")
+    return HTMLResponse(html)
 
 
 @app.get("/api/config")
@@ -77,6 +99,38 @@ def send_message(message: ChatMessage):
         message_id=str(uuid.uuid4()),
         text=message.text,
         hospital_id=HOSPITAL_ID,
+    )
+    orchestrator.handle_message(wa_message)
+    return {"replies": notifier.drain()}
+
+
+@app.post("/api/send-audio")
+async def send_audio_message(from_number: str = Form(...), audio: UploadFile = File(...)):
+    from_number = from_number.strip()
+    if not from_number:
+        raise HTTPException(status_code=400, detail="from_number is required")
+
+    audio_bytes = await audio.read()
+    try:
+        transcript, language_code = transcribe_audio(audio_bytes, audio.content_type or "audio/webm")
+    except Exception as exc:
+        logger.error("Voice message transcription failed: %s", exc)
+        return {"replies": ["Sorry, something went wrong processing your voice note. Please try typing instead."]}
+
+    if not transcript.strip():
+        text = translate_static(
+            orchestrator.llm,
+            "Sorry, I couldn't understand that voice note — could you type your message instead?",
+            language_code,
+        )
+        return {"replies": [text]}
+
+    wa_message = WAMessage(
+        from_number=from_number,
+        message_id=str(uuid.uuid4()),
+        text=transcript,
+        hospital_id=HOSPITAL_ID,
+        language_code=language_code,
     )
     orchestrator.handle_message(wa_message)
     return {"replies": notifier.drain()}

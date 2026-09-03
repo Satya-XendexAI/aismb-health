@@ -7,6 +7,7 @@ const roleBadge    = document.getElementById("roleBadge");
 const chatBody     = document.getElementById("chatBody");
 const textInput    = document.getElementById("textInput");
 const sendBtn      = document.getElementById("sendBtn");
+const micBtn       = document.getElementById("micBtn");
 
 // ── Login ──────────────────────────────────────────────────────────────
 
@@ -45,7 +46,7 @@ document.getElementById("customBtn").addEventListener("click", () => {
 function startSession(user) {
   currentUser = user;
   loginOverlay.style.display = "none";
-  phoneUI.style.display      = "block";
+  phoneUI.style.display      = "flex";
   roleBadge.textContent      = `${ROLE_ICON[user.role]} ${ROLE_LABEL[user.role]}`;
   roleBadge.style.background = ROLE_COLOR[user.role];
   textInput.focus();
@@ -121,3 +122,55 @@ sendBtn.addEventListener("click", sendMessage);
 textInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter") sendMessage();
 });
+
+// ── Voice messages ───────────────────────────────────────────────────────
+
+let mediaRecorder = null;
+let audioChunks    = [];
+let isRecording     = false;
+
+async function toggleRecording() {
+  if (!currentUser) return;
+
+  if (!isRecording) {
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioChunks   = [];
+      mediaRecorder = new MediaRecorder(stream);
+      mediaRecorder.ondataavailable = (e) => audioChunks.push(e.data);
+      mediaRecorder.onstop = sendRecordedAudio;
+      mediaRecorder.start();
+      isRecording = true;
+      micBtn.classList.add("recording");
+    } catch (err) {
+      addBubble("[Microphone access denied]", "in");
+    }
+  } else {
+    mediaRecorder.stop();
+    mediaRecorder.stream.getTracks().forEach((track) => track.stop());
+    isRecording = false;
+    micBtn.classList.remove("recording");
+  }
+}
+
+async function sendRecordedAudio() {
+  const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType || "audio/webm" });
+  addBubble("🎤 Voice message", "out");
+  showTyping();
+
+  const form = new FormData();
+  form.append("from_number", currentUser.phone);
+  form.append("audio", blob, "voice.webm");
+
+  try {
+    const res  = await fetch("/api/send-audio", { method: "POST", body: form });
+    const data = await res.json();
+    hideTyping();
+    data.replies.forEach((reply) => addBubble(reply, "in"));
+  } catch (err) {
+    hideTyping();
+    addBubble("[Error contacting server]", "in");
+  }
+}
+
+micBtn.addEventListener("click", toggleRecording);
