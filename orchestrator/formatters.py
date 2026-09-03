@@ -29,12 +29,21 @@ def describe_tool(tool_call) -> str:
     return desc
 
 
-def format_booking_result(result: dict, tool_args: dict) -> str | None:
+def format_booking_result(result: dict, tool_args: dict, labels: dict | None = None) -> str | None:
+    """Render the booking-confirmation card.
+
+    `labels` optionally supplies translated field names (see
+    orchestrator.llm.CARD_LABELS for the expected keys); any missing key
+    falls back to its English default.
+    """
     if result.get("action") != "BOOK":
         return None
     booking = result.get("result", {})
     if booking.get("status") != "CONFIRMED":
         return None
+
+    labels = labels or {}
+    L = lambda key, default: labels.get(key, default)
 
     token    = booking.get("token_number", "?")
     doctor   = booking.get("doctor_name", tool_args.get("doctor_name", "the doctor"))
@@ -45,20 +54,20 @@ def format_booking_result(result: dict, tool_args: dict) -> str | None:
     eta      = booking.get("estimated_time", "")
     date_str = tool_args.get("date", "today")
 
-    lines = ["✅ *Appointment Confirmed*\n"]
-    lines.append(f"🎫 *Token:* #{token}")
-    lines.append(f"👨‍⚕️ *Doctor:* {doctor}")
+    lines = [f"✅ *{L('appointment_confirmed', 'Appointment Confirmed')}*\n"]
+    lines.append(f"🎫 *{L('token', 'Token')}:* #{token}")
+    lines.append(f"👨‍⚕️ *{L('doctor', 'Doctor')}:* {doctor}")
     if dept:
-        lines.append(f"🏛 *Department:* {dept}")
+        lines.append(f"🏛 *{L('department', 'Department')}:* {dept}")
     if hospital:
-        lines.append(f"🏥 *Hospital:* {hospital}")
+        lines.append(f"🏥 *{L('hospital', 'Hospital')}:* {hospital}")
     if address:
-        lines.append(f"📍 *Address:* {address}")
-    lines.append(f"📅 *Date:* {date_str}")
+        lines.append(f"📍 *{L('address', 'Address')}:* {address}")
+    lines.append(f"📅 *{L('date', 'Date')}:* {date_str}")
     if eta and "T" in str(eta):
-        lines.append(f"⏰ *Reporting Time:* {str(eta).split('T')[1][:5]}")
+        lines.append(f"⏰ *{L('reporting_time', 'Reporting Time')}:* {str(eta).split('T')[1][:5]}")
     if fee:
-        lines.append(f"💰 *Fee:* ₹{int(fee)}")
+        lines.append(f"💰 *{L('fee', 'Fee')}:* ₹{int(fee)}")
     return "\n".join(lines)
 
 

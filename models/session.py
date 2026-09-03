@@ -43,10 +43,11 @@ class ChatTurn:
 
 @dataclass
 class WAMessage:
-    from_number: str
-    message_id:  str
-    text:        str
-    hospital_id: str
+    from_number:   str
+    message_id:    str
+    text:          str
+    hospital_id:   str
+    language_code: str | None = None   # e.g. "te-IN", from voice transcription; None for typed text
 
 @dataclass
 class PlanAction:
@@ -77,6 +78,7 @@ class Session:
     memory_loaded:   bool = False
     memory_context:  str  = ""
     pending_plan:    Optional[List["PlanAction"]] = None
+    language_code:   str  = "en"   # sticks once a voice message sets it; drives template translation
 
 @dataclass
 class AgentResponse:

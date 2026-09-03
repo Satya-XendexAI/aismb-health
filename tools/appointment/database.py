@@ -80,12 +80,19 @@ def find_family_member(conn, requester_phone, hospital_id, patient_name, relatio
 def insert_family_member(conn, hospital_id, requester_phone, name, phone,
                          relation, age=None, location=None, diagnosis=None):
     """Insert a new family member. Uses ON CONFLICT for safe re-delivery."""
+    # Must match the live unique index exactly (columns + partial WHERE) or
+    # Postgres rejects the ON CONFLICT with "no unique or exclusion constraint
+    # matching the ON CONFLICT specification". The index only covers family
+    # members (relation != 'self') — self-bookings are deduped upstream by
+    # find_family_member() instead, so they never hit this arbiter.
     sql = """
         INSERT INTO patients
             (hospital_id, name, phone, age, location, diagnosis,
              requested_by_phone, relation_to_requester)
         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (hospital_id, requested_by_phone, (LOWER(name))) DO NOTHING
+        ON CONFLICT (hospital_id, requested_by_phone, (LOWER(name)), (LOWER(relation_to_requester)))
+            WHERE LOWER(relation_to_requester) <> 'self'
+            DO NOTHING
         RETURNING patient_id, hospital_id, name, phone, age, location, diagnosis,
                   requested_by_phone, relation_to_requester
     """

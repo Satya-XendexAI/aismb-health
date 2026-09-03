@@ -94,6 +94,7 @@ body {
 
 .chat-body {
   flex: 1;
+  min-height: 0;
   background: #e5ddd5;
   padding: 12px;
   overflow-y: auto;
@@ -192,6 +193,16 @@ body {
 .send-btn .icon {
   width: 20px;
   height: 20px;
+}
+
+.mic-btn.recording {
+  background: #d32f2f;
+  animation: pulse 1s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.6; }
 }
 
 /* ── Login overlay ───────────────────────────────────────────────── */

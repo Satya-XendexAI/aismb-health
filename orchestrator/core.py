@@ -14,6 +14,7 @@ from orchestrator.schemas import (
 )
 from orchestrator.utils import detect_booking_intent, is_affirmative, is_negative
 from orchestrator.formatters import format_booking_result, chunk_text
+from orchestrator.llm import translate_static, translate_labels, normalize_to_english
 from orchestrator import gates
 from prompts.system import PATIENT_SYSTEM_PROMPT, DOCTOR_SYSTEM_PROMPT, ADMIN_SYSTEM_PROMPT
 
@@ -42,8 +43,13 @@ class WhatsAppOrchestrator:
             self._handle_message_inner(wa_message)
         except Exception as exc:
             logger.error("Unhandled error in handle_message: %s", exc, exc_info=True)
+            text = self.fallback_text
             try:
-                self.notifier.send(wa_message.from_number, self.fallback_text)
+                text = translate_static(self.llm, self.fallback_text, wa_message.language_code)
+            except Exception:
+                pass
+            try:
+                self.notifier.send(wa_message.from_number, text)
             except Exception:
                 pass
 
@@ -103,7 +109,13 @@ class WhatsAppOrchestrator:
             session.state        = SessionState.IDLE
             self.repository.save_session(session)
             self._log_tool(tool_call)
-            result = self._execute_tool(tool_call, context)
+            try:
+                result = self._execute_tool(tool_call, context)
+            except Exception as tool_exc:
+                logger.error("Tool %s failed at confirm-gate: %s", tool_call.tool_name, tool_exc, exc_info=True)
+                text = translate_static(self.llm, "Sorry, something went wrong completing that. Please try again.", session.language_code)
+                self._responder(text, context)
+                return
             session.history.append(ChatTurn(
                 role=ChatRole.TOOL_RESULT,
                 content=json.dumps(result),
@@ -121,7 +133,8 @@ class WhatsAppOrchestrator:
             if tool_call.tool_name == "appointment":
                 if result.get("action") in ("BOOK", "CANCEL"):
                     session.memory_loaded = False
-                formatted = format_booking_result(result, tool_call.args)
+                labels    = translate_labels(self.llm, session.language_code)
+                formatted = format_booking_result(result, tool_call.args, labels)
                 if formatted:
                     self._responder(formatted, context)
                     return
@@ -133,10 +146,16 @@ class WhatsAppOrchestrator:
             session.pending_tool = None
             session.state        = SessionState.IDLE
             session.history.append(ChatTurn(role=ChatRole.USER, content=wa_message.text))
-            self._responder("Understood. Your request has been cancelled.", context)
+            self._responder(
+                translate_static(self.llm, "Understood. Your request has been cancelled.", session.language_code),
+                context,
+            )
 
         else:
-            self._responder("Please reply *YES* to confirm or *NO* to cancel.", context)
+            self._responder(
+                translate_static(self.llm, "Please reply *YES* to confirm or *NO* to cancel.", session.language_code),
+                context,
+            )
 
     def _build_prompt_and_tools(self, wa_message, session):
         if session.role == Role.ADMIN:
@@ -170,6 +189,10 @@ class WhatsAppOrchestrator:
     def _react_loop(self, context, system_prompt, tool_schemas):
         session    = context.session
         final_text = self.fallback_text
+        # Only our own hardcoded fallback strings need translating at the end —
+        # LLM-generated text already matches the patient's language, and the
+        # booking card is already localized via translate_labels() below.
+        needs_translation = True
         kg_empty_streak = 0
 
         for _ in range(self.max_iterations):
@@ -180,6 +203,7 @@ class WhatsAppOrchestrator:
 
             if agent_response.type == AgentResponseType.TEXT:
                 final_text = agent_response.text
+                needs_translation = False
                 break
 
             session.history.append(ChatTurn(
@@ -200,12 +224,16 @@ class WhatsAppOrchestrator:
                 gates.interrupt_delay(agent_response.tool_call.args, context, doc_cfg, self.repository, self.notifier)
                 return
 
+            if agent_response.tool_call.tool_name == "appointment":
+                self._normalize_appointment_args(agent_response.tool_call)
+
             gate_result = self._gate(agent_response.tool_call, context)
             if gate_result.status == GateStatus.FORBIDDEN:
-                self._responder("Sorry, you don't have permission to perform this action.", context)
+                text = translate_static(self.llm, "Sorry, you don't have permission to perform this action.", session.language_code)
+                self._responder(text, context)
                 return
             if gate_result.status == GateStatus.CONFIRM_REQUIRED:
-                gates.interrupt_tool(agent_response.tool_call, context, self.repository, self.notifier)
+                gates.interrupt_tool(agent_response.tool_call, context, self.repository, self.notifier, self.llm)
                 return
 
             self._log_tool(agent_response.tool_call)
@@ -236,11 +264,15 @@ class WhatsAppOrchestrator:
             if agent_response.tool_call.tool_name == "appointment":
                 if result.get("action") in ("BOOK", "CANCEL"):
                     session.memory_loaded = False
-                formatted = format_booking_result(result, agent_response.tool_call.args)
+                labels    = translate_labels(self.llm, session.language_code)
+                formatted = format_booking_result(result, agent_response.tool_call.args, labels)
                 if formatted:
                     final_text = formatted
+                    needs_translation = False
                     break
 
+        if needs_translation:
+            final_text = translate_static(self.llm, final_text, session.language_code)
         self._responder(final_text, context)
 
     def _hydrate(self, wa_message: WAMessage) -> OrchestratorContext:
@@ -255,6 +287,8 @@ class WhatsAppOrchestrator:
                 pending_tool = None,
                 role         = self.repository.get_role(wa_message.from_number),
             )
+        if wa_message.language_code:
+            session.language_code = wa_message.language_code
         self.repository.save_session(session)
         return OrchestratorContext(wa_message, session)
 
@@ -267,6 +301,15 @@ class WhatsAppOrchestrator:
         except Exception as exc:
             logger.warning("memory preload failed: %s", exc)
             session.memory_loaded = True
+
+    def _normalize_appointment_args(self, tool_call):
+        """Store/lookup patient data in English regardless of what language it
+        was spoken in — keeps hospital records consistent and lets
+        family-member lookups (matched by name) work across conversations
+        in different languages."""
+        for field in ("patient_name", "patient_location", "symptoms"):
+            if tool_call.args.get(field):
+                tool_call.args[field] = normalize_to_english(self.llm, tool_call.args[field])
 
     def _gate(self, tool_call, context: OrchestratorContext) -> GateResult:
         allowed = ROLE_PERMISSIONS.get(tool_call.tool_name, {Role.PATIENT, Role.DOCTOR})
