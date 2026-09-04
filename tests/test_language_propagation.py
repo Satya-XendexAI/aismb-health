@@ -55,7 +55,8 @@ def test_confirm_gate_translates_booking_card_into_session_language():
     })
 
     fake_labels = {"token": "టోకెన్", "doctor": "డాక్టర్"}  # partial is fine, format_booking_result falls back
-    with patch("orchestrator.core.translate_labels", return_value=fake_labels) as mock_labels:
+    with patch("orchestrator.core.translate_labels", return_value=fake_labels) as mock_labels, \
+         patch("orchestrator.core.classify_confirm_reply", return_value="yes"):
         wa_message = WAMessage(from_number="919876543210", message_id="m1", text="yes", hospital_id="glngs-chn")
         orchestrator.handle_message(wa_message)
 
@@ -92,7 +93,8 @@ def test_confirm_gate_reconsiders_unrecognized_reply_via_llm():
     )
     orchestrator = WhatsAppOrchestrator(llm=llm, notifier=notifier, repository=repository)
 
-    with patch("orchestrator.core.translate_text", return_value="మీరు ఎప్పుడు రీషెడ్యూల్ చేయాలనుకుంటున్నారు?") as mock_translate:
+    with patch("orchestrator.core.translate_text", return_value="మీరు ఎప్పుడు రీషెడ్యూల్ చేయాలనుకుంటున్నారు?") as mock_translate, \
+         patch("orchestrator.core.classify_confirm_reply", return_value="unclear"):
         wa_message = WAMessage(from_number="919876543210", message_id="m1", text="maybe later", hospital_id="glngs-chn")
         orchestrator.handle_message(wa_message)
 
@@ -111,7 +113,8 @@ def test_confirm_gate_translates_negative_reply_message():
     notifier     = MagicMock()
     orchestrator = WhatsAppOrchestrator(llm=MagicMock(), notifier=notifier, repository=repository)
 
-    with patch("orchestrator.core.translate_static", return_value="translated cancel message") as mock_translate:
+    with patch("orchestrator.core.translate_static", return_value="translated cancel message") as mock_translate, \
+         patch("orchestrator.core.classify_confirm_reply", return_value="no"):
         wa_message = WAMessage(from_number="919876543210", message_id="m1", text="no", hospital_id="glngs-chn")
         orchestrator.handle_message(wa_message)
 
