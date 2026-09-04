@@ -1,5 +1,6 @@
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional, List, Literal
 
@@ -79,6 +80,7 @@ class Session:
     memory_context:  str  = ""
     pending_plan:    Optional[List["PlanAction"]] = None
     language_code:   str  = "en"   # sticks once a voice message sets it; drives template translation
+    last_active_at:  datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 @dataclass
 class AgentResponse:

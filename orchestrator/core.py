@@ -2,7 +2,7 @@ import uuid
 import json
 import time
 import logging
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from typing import List
 
 from models.session import (
@@ -33,6 +33,7 @@ class WhatsAppOrchestrator:
         fallback_text:     str = "I'm sorry, I couldn't process that. Please try again.",
         max_iterations:    int = int(os.getenv("MAX_ITERATIONS", "5")),
         max_history_turns: int = 10,
+        session_idle_reset_hours: float = float(os.getenv("SESSION_IDLE_RESET_HOURS", "6")),
     ):
         self.llm               = llm
         self.notifier          = notifier
@@ -40,6 +41,7 @@ class WhatsAppOrchestrator:
         self.fallback_text     = fallback_text
         self.max_iterations    = max_iterations
         self.max_history_turns = max_history_turns
+        self.session_idle_reset = timedelta(hours=session_idle_reset_hours)
 
     @traced("WhatsAppOrchestrator.handle_message", run_type="chain", tags=["orchestrator", "agent"])
     def handle_message(self, wa_message: WAMessage):
@@ -295,6 +297,7 @@ class WhatsAppOrchestrator:
 
     def _hydrate(self, wa_message: WAMessage) -> OrchestratorContext:
         session = self.repository.get_session(wa_message.hospital_id, wa_message.from_number)
+        now = datetime.now(timezone.utc)
         if session is None:
             session = Session(
                 session_id   = str(uuid.uuid4()),
@@ -305,6 +308,22 @@ class WhatsAppOrchestrator:
                 pending_tool = None,
                 role         = self.repository.get_role(wa_message.from_number),
             )
+        elif now - session.last_active_at > self.session_idle_reset:
+            # The session store has no concept of "today" vs. "last week" —
+            # a phone number that messaged once, ever, stays "mid-conversation"
+            # forever (turn_count never resets), so the one-time greeting
+            # never fires again and the bot jumps straight into follow-up
+            # mode even though the patient is starting a fresh chat. Treat a
+            # long enough gap as the start of a new conversation.
+            session.state          = SessionState.IDLE
+            session.history        = []
+            session.pending_tool   = None
+            session.pending_plan   = None
+            session.turn_count     = 0
+            session.booking_intent = False
+            session.memory_loaded  = False
+            session.memory_context = ""
+        session.last_active_at = now
         if wa_message.language_code:
             session.language_code = wa_message.language_code
         self.repository.save_session(session)
