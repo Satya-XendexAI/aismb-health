@@ -12,9 +12,11 @@ from models.session import (
 from orchestrator.schemas import (
     PATIENT_TOOLS, PATIENT_TOOLS_WARMUP, DOCTOR_TOOLS, ADMIN_TOOLS, ROLE_PERMISSIONS,
 )
-from orchestrator.utils import detect_booking_intent, is_affirmative, is_negative, looks_like_english
-from orchestrator.formatters import format_booking_result, chunk_text
-from orchestrator.llm import translate_static, translate_text, translate_labels, normalize_to_english
+from orchestrator.utils import detect_booking_intent, looks_like_english
+from orchestrator.formatters import format_booking_result, describe_tool, chunk_text
+from orchestrator.llm import (
+    translate_static, translate_text, translate_labels, normalize_to_english, classify_confirm_reply,
+)
 from orchestrator import gates
 from prompts.system import PATIENT_SYSTEM_PROMPT, DOCTOR_SYSTEM_PROMPT, ADMIN_SYSTEM_PROMPT
 from orchestrator.tracing import traced, add_metadata
@@ -82,16 +84,19 @@ class WhatsAppOrchestrator:
 
     def _handle_awaiting_confirm(self, wa_message, context):
         session = context.session
+        pending = session.pending_tool
+        pending_action = describe_tool(pending) if pending else None
+        reply = classify_confirm_reply(self.llm, wa_message.text, pending_action)
 
         # ── Plan-gate (admin) ──────────────────────────────────────────────────
         if session.pending_plan is not None:
-            if is_affirmative(wa_message.text):
+            if reply == "yes":
                 plan = session.pending_plan
                 session.pending_plan = None
                 session.state        = SessionState.IDLE
                 self.repository.save_session(session)
                 gates.execute_approved_plan(plan, context, self.notifier)
-            elif is_negative(wa_message.text):
+            elif reply == "no":
                 session.pending_plan = None
                 session.state        = SessionState.IDLE
                 self.repository.save_session(session)
@@ -101,21 +106,8 @@ class WhatsAppOrchestrator:
             return
 
         # ── Single-tool gate (booking / delay) ─────────────────────────────────
-        pending = session.pending_tool
-        is_cancel_action = (
-            pending and
-            pending.tool_name == "appointment" and
-            pending.args.get("action") == "CANCEL"
-        )
-        text_is_affirmative = is_affirmative(wa_message.text) or (
-            is_cancel_action and "cancel" in wa_message.text.strip().lower()
-        )
-        text_is_negative = is_negative(wa_message.text) and not (
-            is_cancel_action and "cancel" in wa_message.text.strip().lower()
-        )
-
-        if text_is_affirmative:
-            tool_call            = session.pending_tool
+        if reply == "yes":
+            tool_call            = pending
             session.pending_tool = None
             session.state        = SessionState.IDLE
             self.repository.save_session(session)
@@ -150,7 +142,7 @@ class WhatsAppOrchestrator:
             system_prompt, tool_schemas = self._build_prompt_and_tools(wa_message, session)
             self._react_loop(context, system_prompt, tool_schemas)
 
-        elif text_is_negative:
+        elif reply == "no":
             self._resolve_pending_tool_as_not_executed(session, "Cancelled — the patient declined.")
             session.state = SessionState.IDLE
             session.history.append(ChatTurn(role=ChatRole.USER, content=wa_message.text))

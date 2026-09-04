@@ -75,6 +75,26 @@ def test_translate_text_falls_back_when_model_returns_a_diff_instead_of_a_transl
     assert adapter.client.chat.completions.create.call_count == 2  # retried once before giving up
 
 
+def test_translate_text_falls_back_when_model_invents_an_extra_instruction():
+    # Reproduces a real failure seen in production: translating a plain
+    # confirm prompt ("Please confirm: BOOK appointment with Dr. X" — no
+    # formatting instructions anywhere in it, no date/time/# to trip the
+    # existing invariant check) came back with a fabricated extra sentence
+    # telling the patient to reply in a specific format, using "**"
+    # markers the source never had. Patients should never be told to
+    # follow a reply format the system doesn't actually require —
+    # classify_confirm_reply already understands natural replies.
+    adapter = _adapter_with_completion(
+        "దయచేసి కన్ఫర్మ్ చేయండి: డాక్టర్ X తో అపాయింట్మెంట్ బుక్ చేయండి "
+        "ఫార్మాటింగ్ కోసం**: మార్చుబడిన సెక్స్‌న్తో మాత్రమే రిప్లై ఇవ్వండి"
+    )
+
+    result = translate_text(adapter, "Please confirm: BOOK appointment with Dr. X", "te-IN")
+
+    assert result == "Please confirm: BOOK appointment with Dr. X"
+    assert adapter.client.chat.completions.create.call_count == 2  # retried once before giving up
+
+
 def test_translate_text_falls_back_when_model_drops_the_fee_and_token_numbers():
     # Reproduces another real failure: the model leaks its own word-choice
     # reasoning ("let's use X or Y...") instead of translating — no backtick

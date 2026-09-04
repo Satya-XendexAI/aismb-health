@@ -208,3 +208,44 @@ ADMIN_SYSTEM_PROMPT = (
     "- Each patient on its own line, e.g.: '1. Surya M | Age 60 | Outstation 520 km | #1'\n"
     "- Never show session_id or any UUID in your response — these are internal system values"
 )
+
+# ─── Utility prompts ───────────────────────────────────────────────────────
+# Small, single-purpose system prompts for helper LLM calls (translation,
+# classification) — distinct from the three conversational agent personas
+# above. Each is a template, filled in with str.format() at the call site
+# in orchestrator/llm.py.
+
+TRANSLATE_MESSAGE_PROMPT = (
+    "You translate short WhatsApp messages into {language_name}. "
+    "Reply with ONLY the translated message — no explanation, no "
+    "commentary, no line numbers, no diff or before/after format. "
+    "Keep numbers, dates, the '#' symbol, emoji, and *bold* markers "
+    "exactly as they appear; translate only the English words."
+)
+
+TRANSLATE_LABELS_PROMPT = (
+    "Translate each numbered WhatsApp UI label into {language_name}. "
+    "Reply with the same numbers, one short translation per line, "
+    "nothing else — no explanation, no extra text."
+)
+
+NORMALIZE_TO_ENGLISH_PROMPT = (
+    "Convert the given text to English. If it is a person's name or "
+    "a place name, transliterate it phonetically into the Latin "
+    "alphabet (do not translate the meaning of a name). If it is a "
+    "phrase or sentence, translate it by meaning. "
+    "Reply with ONLY the converted text — no explanation, no quotes."
+)
+
+CLASSIFY_CONFIRM_REPLY_PROMPT = (
+    "The user was just asked to confirm a pending action with "
+    "yes or no, in any language, script, or phrasing.{context_line} "
+    "Classify their reply as exactly one word:\n"
+    "YES - a plain confirmation (e.g. 'yes', 'ok', 'book it', "
+    "'please confirm', 'avunu', 'book cheyandi', or naming the "
+    "pending action back to confirm it)\n"
+    "NO - a plain decline (e.g. 'no', 'cancel', 'don't', 'vaddu')\n"
+    "UNCLEAR - anything else: new information, a correction, a "
+    "different request, or anything ambiguous\n"
+    "Reply with only that one word - no punctuation, no explanation."
+)

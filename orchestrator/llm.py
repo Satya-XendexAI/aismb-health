@@ -9,7 +9,10 @@ from dotenv import load_dotenv
 from models.session import (
     ChatTurn, ChatRole, AgentResponse, AgentResponseType, ToolCall,
 )
-from prompts.system import PATIENT_SYSTEM_PROMPT
+from prompts.system import (
+    PATIENT_SYSTEM_PROMPT, TRANSLATE_MESSAGE_PROMPT, TRANSLATE_LABELS_PROMPT,
+    NORMALIZE_TO_ENGLISH_PROMPT, CLASSIFY_CONFIRM_REPLY_PROMPT,
+)
 from orchestrator.tracing import traced, add_metadata, record_usage
 
 load_dotenv()
@@ -50,6 +53,8 @@ def _looks_like_broken_translation(original: str, translated: str) -> bool:
         return True
     if translated.count("(") != translated.count(")"):
         return True  # e.g. the model stopped generating mid-parenthetical
+    if "**" in translated and "**" not in original:
+        return True  # the model invented an extra instruction the source never asked for
     return any(literal not in translated for literal in _INVARIANT_RE.findall(original))
 
 
@@ -59,13 +64,7 @@ def _request_translation(llm: "GeminiLLMAdapter", text: str, language_name: str)
         messages=[
             {
                 "role": "system",
-                "content": (
-                    f"You translate short WhatsApp messages into {language_name}. "
-                    "Reply with ONLY the translated message — no explanation, no "
-                    "commentary, no line numbers, no diff or before/after format. "
-                    "Keep numbers, dates, the '#' symbol, emoji, and *bold* markers "
-                    "exactly as they appear; translate only the English words."
-                ),
+                "content": TRANSLATE_MESSAGE_PROMPT.format(language_name=language_name),
             },
             {"role": "user", "content": text},
         ],
@@ -105,6 +104,46 @@ def translate_text(llm: "GeminiLLMAdapter", text: str, language_code: str | None
         )
 
     return text
+
+
+def classify_confirm_reply(llm: "GeminiLLMAdapter", text: str, pending_action: str | None = None) -> str:
+    """Classify a reply to a yes/no confirmation prompt as 'yes', 'no', or
+    'unclear' (new information, a correction, or anything that isn't a
+    plain confirmation) — via the LLM itself, so it understands any
+    language, script, or phrasing (a bare 'yes', a full sentence, or
+    code-mixed replies like Telugu 'cheyandi' + an English verb) without a
+    hardcoded word list to keep extending by hand.
+
+    `pending_action` (e.g. "CANCEL appointment with Dr. X") gives the model
+    the context to resolve an otherwise-ambiguous reply — replying "cancel"
+    to a cancellation confirmation means yes, not a new decline.
+
+    Falls back to 'unclear' on any failure or unrecognized output, so a
+    pending action is never silently treated as confirmed."""
+    context_line = f' They were asked to confirm this action: "{pending_action}".' if pending_action else ""
+    try:
+        completion = llm.client.chat.completions.create(
+            model=llm.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": CLASSIFY_CONFIRM_REPLY_PROMPT.format(context_line=context_line),
+                },
+                {"role": "user", "content": text},
+            ],
+            temperature=0.0,
+            max_tokens=10,
+        )
+        reply = (completion.choices[0].message.content or "").strip().upper()
+    except Exception as exc:
+        logger.warning("Confirm-reply classification failed, treating as unclear: %s", exc)
+        return "unclear"
+
+    if reply.startswith("YES"):
+        return "yes"
+    if reply.startswith("NO"):
+        return "no"
+    return "unclear"
 
 
 # Fixed, unchanging messages (no dynamic content) only ever need translating
@@ -169,11 +208,7 @@ def translate_labels(llm: "GeminiLLMAdapter", language_code: str | None) -> dict
                 messages=[
                     {
                         "role": "system",
-                        "content": (
-                            f"Translate each numbered WhatsApp UI label into {language_name}. "
-                            "Reply with the same numbers, one short translation per line, "
-                            "nothing else — no explanation, no extra text."
-                        ),
+                        "content": TRANSLATE_LABELS_PROMPT.format(language_name=language_name),
                     },
                     {"role": "user", "content": numbered_prompt},
                 ],
@@ -224,13 +259,7 @@ def normalize_to_english(llm: "GeminiLLMAdapter", text: str) -> str:
             messages=[
                 {
                     "role": "system",
-                    "content": (
-                        "Convert the given text to English. If it is a person's name or "
-                        "a place name, transliterate it phonetically into the Latin "
-                        "alphabet (do not translate the meaning of a name). If it is a "
-                        "phrase or sentence, translate it by meaning. "
-                        "Reply with ONLY the converted text — no explanation, no quotes."
-                    ),
+                    "content": NORMALIZE_TO_ENGLISH_PROMPT,
                 },
                 {"role": "user", "content": text},
             ],
