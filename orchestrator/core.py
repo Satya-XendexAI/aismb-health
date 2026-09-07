@@ -15,7 +15,7 @@ from orchestrator.schemas import (
 from orchestrator.utils import detect_booking_intent, looks_like_english
 from orchestrator.formatters import format_booking_result, describe_tool, chunk_text
 from orchestrator.llm import (
-    translate_static, translate_text, translate_labels, normalize_to_english, classify_confirm_reply,
+    translate_static, translate_text, translate_labels, normalize_to_english, resolve_confirmation,
 )
 from orchestrator import gates
 from prompts.system import PATIENT_SYSTEM_PROMPT, DOCTOR_SYSTEM_PROMPT, ADMIN_SYSTEM_PROMPT
@@ -86,7 +86,8 @@ class WhatsAppOrchestrator:
         session = context.session
         pending = session.pending_tool
         pending_action = describe_tool(pending) if pending else None
-        reply = classify_confirm_reply(self.llm, wa_message.text, pending_action)
+        recent_context = self._recent_conversation_text(session)
+        reply = resolve_confirmation(self.llm, wa_message.text, recent_context, pending_action)
 
         # ── Plan-gate (admin) ──────────────────────────────────────────────────
         if session.pending_plan is not None:
@@ -320,6 +321,27 @@ class WhatsAppOrchestrator:
             session.language_code = wa_message.language_code
         self.repository.save_session(session)
         return OrchestratorContext(wa_message, session)
+
+    def _recent_conversation_text(self, session, max_turns: int = 6) -> str:
+        """Plain-text summary of the last max_turns USER/ASSISTANT turns —
+        tool calls and tool results deliberately excluded. This feeds a small
+        side call (resolve_confirmation), not the main tool-calling loop, so
+        it only needs readable conversation, never the raw tool-call/tool-
+        result pairing the main loop's history depends on.
+
+        Walks history backwards and stops once max_turns *conversational*
+        lines are found — not the last max_turns raw history entries, which
+        would undercount whenever tool-call/tool-result turns are interleaved
+        (every confirm-gate booking proposal leaves at least one such turn)."""
+        lines = []
+        for turn in reversed(session.history):
+            if turn.role == ChatRole.USER:
+                lines.append(f"Patient: {turn.content}")
+            elif turn.role == ChatRole.ASSISTANT and not turn.tool_call:
+                lines.append(f"Assistant: {turn.content}")
+            if len(lines) == max_turns:
+                break
+        return "\n".join(reversed(lines))
 
     def _preload_memory(self, session, wa_message: WAMessage):
         try:

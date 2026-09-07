@@ -83,7 +83,7 @@ def test_translate_text_falls_back_when_model_invents_an_extra_instruction():
     # telling the patient to reply in a specific format, using "**"
     # markers the source never had. Patients should never be told to
     # follow a reply format the system doesn't actually require —
-    # classify_confirm_reply already understands natural replies.
+    # resolve_confirmation already understands natural replies.
     adapter = _adapter_with_completion(
         "దయచేసి కన్ఫర్మ్ చేయండి: డాక్టర్ X తో అపాయింట్మెంట్ బుక్ చేయండి "
         "ఫార్మాటింగ్ కోసం**: మార్చుబడిన సెక్స్‌న్తో మాత్రమే రిప్లై ఇవ్వండి"

@@ -35,7 +35,7 @@ def test_cancellation_sends_translated_message_without_falling_back_to_llm():
         },
     })
 
-    with patch("orchestrator.core.classify_confirm_reply", return_value="yes"):
+    with patch("orchestrator.core.resolve_confirmation", return_value="yes"):
         wa_message = WAMessage(from_number="919876543210", message_id="m1", text="yes", hospital_id="glngs-chn")
         orchestrator.handle_message(wa_message)
 
@@ -61,7 +61,7 @@ def test_cancellation_message_is_translated_for_non_english_session():
     })
 
     with patch("orchestrator.core.translate_text", return_value="ప్రియ కోసం టోకెన్ #3 రద్దు చేయబడింది.") as mock_translate, \
-         patch("orchestrator.core.classify_confirm_reply", return_value="yes"):
+         patch("orchestrator.core.resolve_confirmation", return_value="yes"):
         wa_message = WAMessage(from_number="919876543210", message_id="m1", text="yes", hospital_id="glngs-chn")
         orchestrator.handle_message(wa_message)
 
@@ -89,7 +89,7 @@ def test_cancellation_error_status_still_falls_back_to_llm():
         "result": {"status": "NO_ACTIVE_BOOKING", "message": "No active booking found for Priya."},
     })
 
-    with patch("orchestrator.core.classify_confirm_reply", return_value="yes"):
+    with patch("orchestrator.core.resolve_confirmation", return_value="yes"):
         wa_message = WAMessage(from_number="919876543210", message_id="m1", text="yes", hospital_id="glngs-chn")
         orchestrator.handle_message(wa_message)
 

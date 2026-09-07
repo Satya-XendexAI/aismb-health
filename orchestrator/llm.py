@@ -11,8 +11,9 @@ from models.session import (
 )
 from prompts.system import (
     PATIENT_SYSTEM_PROMPT, TRANSLATE_MESSAGE_PROMPT, TRANSLATE_LABELS_PROMPT,
-    NORMALIZE_TO_ENGLISH_PROMPT, CLASSIFY_CONFIRM_REPLY_PROMPT,
+    NORMALIZE_TO_ENGLISH_PROMPT, RESOLVE_CONFIRMATION_PROMPT,
 )
+from orchestrator.schemas import CONFIRM_REPLY_TOOLS
 from orchestrator.tracing import traced, add_metadata, record_usage
 
 load_dotenv()
@@ -106,44 +107,56 @@ def translate_text(llm: "GeminiLLMAdapter", text: str, language_code: str | None
     return text
 
 
-def classify_confirm_reply(llm: "GeminiLLMAdapter", text: str, pending_action: str | None = None) -> str:
-    """Classify a reply to a yes/no confirmation prompt as 'yes', 'no', or
-    'unclear' (new information, a correction, or anything that isn't a
-    plain confirmation) — via the LLM itself, so it understands any
-    language, script, or phrasing (a bare 'yes', a full sentence, or
-    code-mixed replies like Telugu 'cheyandi' + an English verb) without a
-    hardcoded word list to keep extending by hand.
+def resolve_confirmation(
+    llm: "GeminiLLMAdapter", reply_text: str, recent_context: str = "", pending_action: str | None = None,
+) -> str:
+    """Decide whether `reply_text` confirms or declines a pending action,
+    using recent conversation context (not just the bare reply) so an
+    imperfectly transcribed or unusually phrased reply is understood the
+    same way the rest of the conversation already is — instead of judging
+    a short, isolated string with no context at all.
 
-    `pending_action` (e.g. "CANCEL appointment with Dr. X") gives the model
-    the context to resolve an otherwise-ambiguous reply — replying "cancel"
-    to a cancellation confirmation means yes, not a new decline.
-
-    Falls back to 'unclear' on any failure or unrecognized output, so a
-    pending action is never silently treated as confirmed."""
-    context_line = f' They were asked to confirm this action: "{pending_action}".' if pending_action else ""
+    Returns 'yes', 'no', or 'unclear' (new information, a correction, or
+    anything that isn't a plain confirmation). Falls back to 'unclear' on
+    any failure or unexpected output, so a pending action is never
+    silently treated as confirmed."""
+    system_prompt = RESOLVE_CONFIRMATION_PROMPT.format(
+        pending_action=pending_action or "the pending action",
+        recent_context=recent_context or "(no earlier context)",
+    )
     try:
         completion = llm.client.chat.completions.create(
             model=llm.model,
             messages=[
-                {
-                    "role": "system",
-                    "content": CLASSIFY_CONFIRM_REPLY_PROMPT.format(context_line=context_line),
-                },
-                {"role": "user", "content": text},
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": reply_text},
             ],
+            tools=CONFIRM_REPLY_TOOLS,
+            tool_choice={"type": "function", "function": {"name": "resolve_confirmation"}},
             temperature=0.0,
-            max_tokens=10,
+            # Generous headroom, same reasoning as _request_translation above:
+            # this model spends part of its token budget on internal
+            # "thinking" before producing visible output (a tool call, here) —
+            # a tight budget was observed truncating generation (finish_reason
+            # "length") before the tool call ever appeared, silently falling
+            # back to "unclear" for a perfectly clear reply.
+            max_tokens=1024,
         )
-        reply = (completion.choices[0].message.content or "").strip().upper()
+        message = completion.choices[0].message
+        if not message.tool_calls:
+            return "unclear"
+        call = message.tool_calls[0]
+        if call.function.name != "resolve_confirmation":
+            # tool_choice forces this specific tool, but don't trust that
+            # blindly — never parse a differently-named call as our own.
+            return "unclear"
+        args = json.loads(call.function.arguments)
+        decision = (args.get("decision") or "").lower()
     except Exception as exc:
-        logger.warning("Confirm-reply classification failed, treating as unclear: %s", exc)
+        logger.warning("Confirmation resolution failed, treating as unclear: %s", exc)
         return "unclear"
 
-    if reply.startswith("YES"):
-        return "yes"
-    if reply.startswith("NO"):
-        return "no"
-    return "unclear"
+    return decision if decision in ("yes", "no", "unclear") else "unclear"
 
 
 # Fixed, unchanging messages (no dynamic content) only ever need translating

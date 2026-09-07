@@ -20,8 +20,9 @@ def test_voice_reply_classified_as_yes_actually_books_the_appointment():
     """End-to-end regression for the reported bug: a plain-string matcher
     on the raw reply ('Yes.', 'book it', 'book cheyandi', ...) either
     missed real confirmations or false-positived on unrelated text.
-    Matching now goes through classify_confirm_reply (LLM-based) instead —
-    this confirms a 'yes' classification actually drives a real booking."""
+    Matching now goes through resolve_confirmation (LLM-based, with
+    conversation context) instead — this confirms a 'yes' decision
+    actually drives a real booking."""
     session = _session_awaiting_confirm()
     repository = MagicMock()
     repository.get_session.return_value = session
@@ -37,12 +38,12 @@ def test_voice_reply_classified_as_yes_actually_books_the_appointment():
         },
     })
 
-    with patch("orchestrator.core.classify_confirm_reply", return_value="yes") as mock_classify:
+    with patch("orchestrator.core.resolve_confirmation", return_value="yes") as mock_classify:
         wa_message = WAMessage(from_number="919876543210", message_id="m1", text="book cheyandi", hospital_id="glngs-chn")
         orchestrator.handle_message(wa_message)
 
     mock_classify.assert_called_once_with(
-        orchestrator.llm, "book cheyandi", "BOOK appointment with Thiagarajan Pandian on 2026-09-04",
+        orchestrator.llm, "book cheyandi", "", "BOOK appointment with Thiagarajan Pandian on 2026-09-04",
     )
     orchestrator._execute_tool.assert_called_once()
     assert session.pending_tool is None
@@ -62,7 +63,7 @@ def test_declined_pending_appointment_is_resolved_not_left_dangling():
     notifier = MagicMock()
     orchestrator = WhatsAppOrchestrator(llm=MagicMock(), notifier=notifier, repository=repository)
 
-    with patch("orchestrator.core.classify_confirm_reply", return_value="no"):
+    with patch("orchestrator.core.resolve_confirmation", return_value="no"):
         wa_message = WAMessage(from_number="919876543210", message_id="m1", text="No.", hospital_id="glngs-chn")
         orchestrator.handle_message(wa_message)
 
@@ -83,7 +84,7 @@ def test_unclear_reply_reconsiders_via_llm_instead_of_re_executing():
     llm.run_agent.return_value = AgentResponse(type=AgentResponseType.TEXT, text="Sure, what date works for you?")
     orchestrator = WhatsAppOrchestrator(llm=llm, notifier=notifier, repository=repository)
 
-    with patch("orchestrator.core.classify_confirm_reply", return_value="unclear"):
+    with patch("orchestrator.core.resolve_confirmation", return_value="unclear"):
         wa_message = WAMessage(from_number="919876543210", message_id="m1", text="tomorrow instead", hospital_id="glngs-chn")
         orchestrator.handle_message(wa_message)
 
