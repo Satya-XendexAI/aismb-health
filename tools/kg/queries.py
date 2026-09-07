@@ -4,7 +4,7 @@ from pathlib import Path
 
 import numpy as np
 
-from tools.kg.client import driver, database, embed_client, EMBED_MODEL, TENANT_ID
+from tools.kg.client import driver, database, embed_client, EMBED_MODEL
 
 _SQLITE_PATH = Path(__file__).parent.parent.parent / "data" / "slots.db"
 

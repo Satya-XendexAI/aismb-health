@@ -72,6 +72,8 @@ class Session:
     history:         List[ChatTurn]
     pending_tool:    Optional[ToolCall]
     role:            Role = Role.PATIENT
+    booking_mode:    str  = "TOKEN"   # this hospital's mode — "TOKEN" or "SLOT", looked up once at _hydrate()
+    hospital_name:   str  = ""        # looked up alongside booking_mode, same DB round trip
     turn_count:      int  = 0
     booking_intent:  bool = False
     memory_loaded:   bool = False

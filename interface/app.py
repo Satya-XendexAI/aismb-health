@@ -21,14 +21,17 @@ from pydantic import BaseModel
 
 from orchestrator import WhatsAppOrchestrator, InMemoryRepository, GeminiLLMAdapter, WAMessage
 from interface.notifier import CaptureNotifier
+from tools.appointment import database as appt_db
 
-HOSPITAL_ID = "glngs-chn"
-STATIC_DIR  = Path(__file__).parent / "static"
+STATIC_DIR = Path(__file__).parent / "static"
 
 with open("config/doctors.json") as f:
     _cfg    = json.load(f)
     DOCTORS = _cfg["doctors"]
     ADMINS  = _cfg.get("admins", [])
+
+with appt_db.get_connection() as _conn:
+    HOSPITALS = appt_db.list_hospitals(_conn)   # [{hospital_id, name, booking_mode}, ...] — live from DB, not hardcoded
 
 # ── Orchestrator wiring ────────────────────────────────────────────────
 
@@ -59,6 +62,7 @@ async def no_cache_static(request, call_next):
 class ChatMessage(BaseModel):
     text:        str
     from_number: str
+    hospital_id: str
 
 
 @app.get("/")
@@ -75,24 +79,26 @@ def index():
 
 @app.get("/api/config")
 def get_config():
-    """Return known numbers and their roles for the login screen."""
+    """Return known numbers/roles and the live hospital list for the login screen."""
     users = []
     for a in ADMINS:
         users.append({"phone": a["phone"], "name": a["name"], "role": "admin"})
     for d in DOCTORS:
         users.append({"phone": d["phone"], "name": d["name"], "role": "doctor"})
-    return {"users": users, "hospital_id": HOSPITAL_ID}
+    return {"users": users, "hospitals": HOSPITALS}
 
 
 @app.post("/api/send")
 def send_message(message: ChatMessage):
     if not message.from_number.strip():
         raise HTTPException(status_code=400, detail="from_number is required")
+    if not message.hospital_id.strip():
+        raise HTTPException(status_code=400, detail="hospital_id is required")
     wa_message = WAMessage(
         from_number=message.from_number.strip(),
         message_id=str(uuid.uuid4()),
         text=message.text,
-        hospital_id=HOSPITAL_ID,
+        hospital_id=message.hospital_id.strip(),
     )
     orchestrator.handle_message(wa_message)
     return {"replies": notifier.drain()}

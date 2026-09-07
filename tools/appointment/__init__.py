@@ -18,8 +18,16 @@ def handle_request(payload_dict: dict) -> dict:
     with database.get_connection() as conn:
         if payload.action == "BOOK":
             result = booking.book(conn, payload)
-        else:
+        elif payload.action == "CANCEL":
             result = booking.cancel(conn, payload)
+        elif payload.action == "RESCHEDULE":
+            result = booking.reschedule(conn, payload)
+        else:
+            # Unreachable while IncomingPayload.action stays a 3-value
+            # Literal — kept explicit so a future 4th action fails loudly
+            # instead of silently falling through to the wrong branch.
+            result = ErrorResult(status="ERROR", error_code="UNKNOWN_ACTION",
+                                 message=f"Unrecognized action: {payload.action}")
 
     return BookingResponse(action=payload.action, result=result).model_dump(mode="json")
 
@@ -28,3 +36,10 @@ def list_appointments(hospital_id: str, requester_phone: str, patient_name: str 
     with database.get_connection() as conn:
         rows = database.list_active_appointments(conn, requester_phone, hospital_id, patient_name)
     return {"appointments": rows}
+
+
+def list_available_slots(hospital_id: str, doctor_id: str, date: str) -> dict:
+    with database.get_connection() as conn:
+        rows = database.find_available_slots(conn, doctor_id, hospital_id, date)
+    slots = [{**row, "slot_id": str(row["slot_id"])} for row in rows]
+    return {"slots": slots}

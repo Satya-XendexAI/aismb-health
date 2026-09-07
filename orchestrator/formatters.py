@@ -30,12 +30,21 @@ def describe_tool(tool_call) -> str:
 
 
 def format_booking_result(result: dict, tool_args: dict) -> str | None:
-    if result.get("action") != "BOOK":
+    if result.get("action") not in ("BOOK", "RESCHEDULE"):
         return None
     booking = result.get("result", {})
     if booking.get("status") != "CONFIRMED":
         return None
 
+    # SlotBookingConfirmation has appointment_id, BookingConfirmation has
+    # token_number — the two shapes never overlap, so this alone tells us
+    # which mode produced the result without needing it passed in separately.
+    if "appointment_id" in booking:
+        return _format_slot_confirmation(booking, tool_args)
+    return _format_token_confirmation(booking, tool_args)
+
+
+def _format_token_confirmation(booking: dict, tool_args: dict) -> str:
     token    = booking.get("token_number", "?")
     doctor   = booking.get("doctor_name", tool_args.get("doctor_name", "the doctor"))
     dept     = booking.get("department", "")
@@ -57,6 +66,29 @@ def format_booking_result(result: dict, tool_args: dict) -> str | None:
     lines.append(f"📅 *Date:* {date_str}")
     if eta and "T" in str(eta):
         lines.append(f"⏰ *Reporting Time:* {str(eta).split('T')[1][:5]}")
+    if fee:
+        lines.append(f"💰 *Fee:* ₹{int(fee)}")
+    return "\n".join(lines)
+
+
+def _format_slot_confirmation(booking: dict, tool_args: dict) -> str:
+    doctor    = booking.get("doctor_name", tool_args.get("doctor_name", "the doctor"))
+    dept      = booking.get("department", "")
+    hospital  = booking.get("hospital_name", "")
+    slot_date = booking.get("slot_date", tool_args.get("date", "today"))
+    slot_time = booking.get("slot_time", "")
+    fee       = booking.get("fee")
+    header    = "Appointment Rescheduled" if booking.get("was_rescheduled") else "Appointment Confirmed"
+
+    lines = [f"✅ *{header}*\n"]
+    lines.append(f"👨‍⚕️ *Doctor:* {doctor}")
+    if dept:
+        lines.append(f"🏛 *Department:* {dept}")
+    if hospital:
+        lines.append(f"🏥 *Hospital:* {hospital}")
+    lines.append(f"📅 *Date:* {slot_date}")
+    if slot_time:
+        lines.append(f"⏰ *Time:* {slot_time}")
     if fee:
         lines.append(f"💰 *Fee:* ₹{int(fee)}")
     return "\n".join(lines)

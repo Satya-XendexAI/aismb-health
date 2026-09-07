@@ -89,15 +89,16 @@ _appointment_schema = {
     "function": {
         "name": "appointment",
         "description": (
-            "Book or cancel a token (queue-based) appointment for the patient. "
+            "Book, cancel, or reschedule an appointment for the patient (token-queue or "
+            "fixed-slot, depending on the hospital — see SESSION INFO's Booking mode). "
             "Always call kg_retriever first to get the doctor_id and department. "
             "Ask for patient_name before calling this tool if not already known."
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "action":           {"type": "string", "enum": ["BOOK", "CANCEL"],
-                                     "description": "BOOK to book a new token, CANCEL to cancel existing"},
+                "action":           {"type": "string", "enum": ["BOOK", "CANCEL", "RESCHEDULE"],
+                                     "description": "BOOK to book new, CANCEL to cancel existing, RESCHEDULE to move an existing SLOT-mode appointment to a new slot_id"},
                 "doctor_id":        {"type": "string",
                                      "description": "Doctor's ID from kg_retriever results (sql_id field)"},
                 "department":       {"type": "string",
@@ -114,12 +115,34 @@ _appointment_schema = {
                                      "description": "Patient's symptoms (optional)"},
                 "date":             {"type": "string",
                                      "description": "Appointment date in YYYY-MM-DD format. Required — always ask the patient which date they want, never assume today."},
+                "slot_id":          {"type": "string",
+                                     "description": "SLOT-mode only: the chosen slot's id, from list_available_slots. Required for BOOK/RESCHEDULE when Booking mode is SLOT; omit for TOKEN-mode hospitals."},
                 "relation_to_requester": {"type": "string",
                                      "description": "Who is this for? 'self' if for the patient themselves, otherwise their relation e.g. 'wife', 'father', 'son'. Default: 'self'."},
                 "patient_phone":    {"type": "string",
                                      "description": "Only if the family member has their own separate phone number. Omit if same as the WhatsApp sender's number."},
             },
             "required": ["action", "doctor_id", "department", "patient_name", "date"],
+        },
+    },
+}
+
+_list_available_slots_schema = {
+    "type": "function",
+    "function": {
+        "name": "list_available_slots",
+        "description": (
+            "List a doctor's next available time slots on a given date. SLOT-mode "
+            "hospitals only (see SESSION INFO's Booking mode) — call this before "
+            "booking or rescheduling so the patient can pick a time."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "doctor_id": {"type": "string"},
+                "date":      {"type": "string", "description": "YYYY-MM-DD"},
+            },
+            "required": ["doctor_id", "date"],
         },
     },
 }
@@ -218,14 +241,15 @@ _report_delay_schema = {
     },
 }
 
-PATIENT_TOOLS        = [_appointment_schema, _list_appointments_schema, _kg_retriever_schema, _memory_tool_schema]
-PATIENT_TOOLS_WARMUP = [_list_appointments_schema, _kg_retriever_schema, _memory_tool_schema]
+PATIENT_TOOLS        = [_appointment_schema, _list_appointments_schema, _list_available_slots_schema, _kg_retriever_schema, _memory_tool_schema]
+PATIENT_TOOLS_WARMUP = [_list_appointments_schema, _list_available_slots_schema, _kg_retriever_schema, _memory_tool_schema]
 DOCTOR_TOOLS         = [_kg_retriever_schema, _query_data_schema, _report_delay_schema]
 ADMIN_TOOLS          = [_kg_retriever_schema, _get_session_impact_schema, _find_available_doctors_schema, _execute_plan_schema, _query_data_schema]
 
 ROLE_PERMISSIONS = {
     "appointment":          {Role.PATIENT},
     "list_appointments":    {Role.PATIENT},
+    "list_available_slots": {Role.PATIENT},
     "memory_tool":          {Role.PATIENT},
     "query_data":           {Role.DOCTOR, Role.ADMIN},
     "kg_retriever":         {Role.PATIENT, Role.DOCTOR, Role.ADMIN},
