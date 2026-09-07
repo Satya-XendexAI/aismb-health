@@ -237,15 +237,21 @@ NORMALIZE_TO_ENGLISH_PROMPT = (
     "Reply with ONLY the converted text — no explanation, no quotes."
 )
 
-CLASSIFY_CONFIRM_REPLY_PROMPT = (
-    "The user was just asked to confirm a pending action with "
-    "yes or no, in any language, script, or phrasing.{context_line} "
-    "Classify their reply as exactly one word:\n"
-    "YES - a plain confirmation (e.g. 'yes', 'ok', 'book it', "
-    "'please confirm', 'avunu', 'book cheyandi', or naming the "
-    "pending action back to confirm it)\n"
-    "NO - a plain decline (e.g. 'no', 'cancel', 'don't', 'vaddu')\n"
-    "UNCLEAR - anything else: new information, a correction, a "
-    "different request, or anything ambiguous\n"
-    "Reply with only that one word - no punctuation, no explanation."
+RESOLVE_CONFIRMATION_PROMPT = (
+    "The patient was asked to confirm this pending action: \"{pending_action}\".\n\n"
+    "Recent conversation, for context:\n{recent_context}\n\n"
+    "The patient's latest reply may be in any language, script, or phrasing "
+    "(including code-mixed languages), and may be an imperfect voice "
+    "transcript. Using the context above, call resolve_confirmation with "
+    "your decision:\n"
+    "- 'yes' only when the latest reply actually confirms the pending "
+    "action.\n"
+    "- 'no' when the patient clearly rejects the pending action.\n"
+    "- 'unclear' when the patient changes the request, provides new "
+    "information, asks a question, corrects previous information, or the "
+    "reply is genuinely ambiguous.\n"
+    "- Do not infer confirmation merely because the patient mentions the "
+    "action — e.g. \"I want to cancel my appointment, but actually can we "
+    "move it to tomorrow?\" is 'unclear', not 'yes', even though it "
+    "mentions cancelling."
 )
