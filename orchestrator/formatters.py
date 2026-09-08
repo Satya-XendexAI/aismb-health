@@ -46,6 +46,8 @@ def format_booking_result(result: dict, tool_args: dict, labels: dict | None = N
     L = lambda key, default: labels.get(key, default)
 
     token    = booking.get("token_number", "?")
+    patient  = booking.get("patient_name", "")
+    relation = booking.get("relation_to_requester", "self")
     doctor   = booking.get("doctor_name", tool_args.get("doctor_name", "the doctor"))
     dept     = booking.get("department", "")
     hospital = booking.get("hospital_name", "")
@@ -56,6 +58,9 @@ def format_booking_result(result: dict, tool_args: dict, labels: dict | None = N
 
     lines = [f"✅ *{L('appointment_confirmed', 'Appointment Confirmed')}*\n"]
     lines.append(f"🎫 *{L('token', 'Token')}:* #{token}")
+    if patient:
+        suffix = f" ({relation})" if relation and relation != "self" else ""
+        lines.append(f"🙍 *{L('patient', 'Patient Name')}:* {patient}{suffix}")
     lines.append(f"👨‍⚕️ *{L('doctor', 'Doctor')}:* {doctor}")
     if dept:
         lines.append(f"🏛 *{L('department', 'Department')}:* {dept}")

@@ -65,7 +65,7 @@ def _numbered_translation(values):
 
 def test_translate_labels_returns_all_translated_keys():
     translated_values = [
-        "అపాయింట్‌మెంట్ నిర్ధారించబడింది", "టోకెన్", "డాక్టర్", "విభాగం",
+        "అపాయింట్‌మెంట్ నిర్ధారించబడింది", "టోకెన్", "రోగి పేరు", "డాక్టర్", "విభాగం",
         "ఆసుపత్రి", "చిరునామా", "తేదీ", "రిపోర్టింగ్ సమయం", "ఫీజు",
     ]
     adapter = _adapter_with_completion(_numbered_translation(translated_values))
@@ -73,6 +73,7 @@ def test_translate_labels_returns_all_translated_keys():
     labels = translate_labels(adapter, "te-IN")
 
     assert labels["token"] == "టోకెన్"
+    assert labels["patient"] == "రోగి పేరు"
     assert labels["doctor"] == "డాక్టర్"
     assert labels["fee"] == "ఫీజు"
     assert set(labels.keys()) == set(CARD_LABELS.keys())

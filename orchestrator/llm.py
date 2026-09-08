@@ -185,6 +185,7 @@ def translate_static(llm: "GeminiLLMAdapter", text: str, language_code: str | No
 CARD_LABELS = {
     "appointment_confirmed": "Appointment Confirmed",
     "token":                 "Token",
+    "patient":               "Patient Name",
     "doctor":                "Doctor",
     "department":            "Department",
     "hospital":               "Hospital",
