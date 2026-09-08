@@ -11,7 +11,7 @@ from models.session import (
 )
 from prompts.system import (
     PATIENT_SYSTEM_PROMPT, TRANSLATE_MESSAGE_PROMPT, TRANSLATE_LABELS_PROMPT,
-    NORMALIZE_TO_ENGLISH_PROMPT, RESOLVE_CONFIRMATION_PROMPT,
+    TRANSLATE_BOOKING_VALUES_PROMPT, NORMALIZE_TO_ENGLISH_PROMPT, RESOLVE_CONFIRMATION_PROMPT,
 )
 from orchestrator.schemas import CONFIRM_REPLY_TOOLS
 from orchestrator.tracing import traced, add_metadata, record_usage
@@ -199,6 +199,46 @@ _LABEL_CACHE: dict[str, dict[str, str]] = {}
 _NUMBERED_LINE_RE = re.compile(r"^\s*\d+[.):]\s*(.+)$")
 
 
+def _translate_numbered_list(llm: "GeminiLLMAdapter", items: list[str], system_prompt: str) -> list[str] | None:
+    """Translate a short numbered list of strings in one batched call —
+    shared by translate_labels() and translate_booking_values(), since
+    both need the same "numbered in, numbered out" round trip and the
+    same malformed-output check. Returns None (never a partial or
+    wrong-length list) if the call fails or the output doesn't parse
+    cleanly, so callers can retry or fall back safely."""
+    numbered_prompt = "\n".join(f"{i+1}. {item}" for i, item in enumerate(items))
+    try:
+        completion = llm.client.chat.completions.create(
+            model=llm.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": numbered_prompt},
+            ],
+            temperature=0.1,
+            # Generous headroom — a tight budget was observed truncating
+            # the list mid-way (same concern as _request_translation).
+            max_tokens=4096,
+        )
+        reply = (completion.choices[0].message.content or "").strip()
+    except Exception as exc:
+        logger.warning("Batch translation failed: %s", exc)
+        return None
+
+    translated_lines = {}
+    for line in reply.splitlines():
+        m = _NUMBERED_LINE_RE.match(line)
+        if m:
+            translated_lines[len(translated_lines) + 1] = m.group(1).strip()
+
+    if len(translated_lines) == len(items) and all(
+        v and "`" not in v and "->" not in v for v in translated_lines.values()
+    ):
+        return [translated_lines[i + 1] for i in range(len(items))]
+
+    logger.warning("Batch translation looked malformed: %r", reply[:300])
+    return None
+
+
 def translate_labels(llm: "GeminiLLMAdapter", language_code: str | None) -> dict[str, str]:
     """Translate CARD_LABELS into language_code once, then return the cached result.
 
@@ -213,45 +253,45 @@ def translate_labels(llm: "GeminiLLMAdapter", language_code: str | None) -> dict
         return _LABEL_CACHE[lang_prefix]
 
     keys = list(CARD_LABELS.keys())
-    numbered_prompt = "\n".join(f"{i+1}. {CARD_LABELS[k]}" for i, k in enumerate(keys))
+    prompt = TRANSLATE_LABELS_PROMPT.format(language_name=language_name)
 
-    for attempt in (1, 2):
-        try:
-            completion = llm.client.chat.completions.create(
-                model=llm.model,
-                messages=[
-                    {
-                        "role": "system",
-                        "content": TRANSLATE_LABELS_PROMPT.format(language_name=language_name),
-                    },
-                    {"role": "user", "content": numbered_prompt},
-                ],
-                temperature=0.1,
-                # Same headroom concern as _request_translation — a tight
-                # budget was observed truncating the label list mid-way.
-                max_tokens=4096,
-            )
-            reply = (completion.choices[0].message.content or "").strip()
-        except Exception as exc:
-            logger.warning("Label translation to %s failed, using English: %s", language_name, exc)
-            return CARD_LABELS
-
-        translated_lines = {}
-        for line in reply.splitlines():
-            m = _NUMBERED_LINE_RE.match(line)
-            if m:
-                translated_lines[len(translated_lines) + 1] = m.group(1).strip()
-
-        if len(translated_lines) == len(keys) and all(
-            v and "`" not in v and "->" not in v for v in translated_lines.values()
-        ):
-            labels = {keys[i]: translated_lines[i + 1] for i in range(len(keys))}
+    for _ in (1, 2):
+        translated = _translate_numbered_list(llm, [CARD_LABELS[k] for k in keys], prompt)
+        if translated:
+            labels = dict(zip(keys, translated))
             _LABEL_CACHE[lang_prefix] = labels
             return labels
 
-        logger.warning("Label translation to %s looked malformed (attempt %d): %r", language_name, attempt, reply[:300])
-
     return CARD_LABELS
+
+
+def translate_booking_values(llm: "GeminiLLMAdapter", values: dict[str, str], language_code: str | None) -> dict[str, str]:
+    """Translate booking-card display VALUES (patient name, doctor name,
+    hospital name, address, department) into language_code — purely a
+    display-time step. The underlying stored booking data stays in
+    English regardless (see normalize_to_english / _normalize_appointment_
+    args), so records and family-member lookups stay consistent across
+    languages; this only affects what the patient reads on the card.
+
+    Names and places are transliterated phonetically (never translated by
+    meaning); department names are translated by meaning. Falls back to
+    the original English values for English/unknown languages or if the
+    call fails or looks malformed — a booking confirmation must never be
+    blocked or garbled by a translation hiccup."""
+    lang_prefix = (language_code or "en").split("-")[0].lower()
+    language_name = LANGUAGE_NAMES.get(lang_prefix)
+    if not language_name or language_name == "English" or not values:
+        return values
+
+    keys = list(values.keys())
+    prompt = TRANSLATE_BOOKING_VALUES_PROMPT.format(language_name=language_name)
+
+    for _ in (1, 2):
+        translated = _translate_numbered_list(llm, [values[k] for k in keys], prompt)
+        if translated:
+            return dict(zip(keys, translated))
+
+    return values
 
 
 def normalize_to_english(llm: "GeminiLLMAdapter", text: str) -> str:
@@ -359,6 +399,12 @@ class GeminiLLMAdapter:
                     messages.append({"role": "user", "content": turn.content})
 
             elif turn.role == ChatRole.ASSISTANT:
+                if turn.tool_call and not (turn.tool_call.tool_name and turn.tool_call.tool_use_id):
+                    # Same invalid-input risk as the TOOL_RESULT branch
+                    # below — a tool call with no name/id is something
+                    # Gemini rejects outright ("Name cannot be empty").
+                    # Skip it rather than send it.
+                    continue
                 if turn.tool_call:
                     tc_entry = {
                         "id":       turn.tool_call.tool_use_id,

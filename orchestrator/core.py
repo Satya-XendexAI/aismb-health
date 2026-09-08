@@ -2,6 +2,7 @@ import uuid
 import json
 import time
 import logging
+import openai
 from datetime import date, datetime, timedelta, timezone
 from typing import List
 
@@ -15,13 +16,30 @@ from orchestrator.schemas import (
 from orchestrator.utils import detect_booking_intent, looks_like_english
 from orchestrator.formatters import format_booking_result, describe_tool, chunk_text
 from orchestrator.llm import (
-    translate_static, translate_text, translate_labels, normalize_to_english, resolve_confirmation,
+    translate_static, translate_text, translate_labels, translate_booking_values,
+    normalize_to_english, resolve_confirmation,
 )
 from orchestrator import gates
 from prompts.system import PATIENT_SYSTEM_PROMPT, DOCTOR_SYSTEM_PROMPT, ADMIN_SYSTEM_PROMPT
 from orchestrator.tracing import traced, add_metadata
 
 logger = logging.getLogger(__name__)
+
+
+def _trim_history(history: list, max_turns: int) -> list:
+    """Keep the last max_turns entries, then drop any leading TOOL_RESULT
+    turns left dangling by that cut.
+
+    The LLM API requires a "tool" role message to immediately follow the
+    "assistant" message that proposed it (see GeminiLLMAdapter._build_
+    messages). A plain slice can cut a tool-call/tool-result pair apart,
+    keeping the result but dropping the assistant turn that proposed it —
+    that leftover result is an unpaired, invalid message the API rejects
+    outright ("function_response.name: Name cannot be empty")."""
+    trimmed = history[-max_turns:]
+    while trimmed and trimmed[0].role == ChatRole.TOOL_RESULT:
+        trimmed = trimmed[1:]
+    return trimmed
 
 
 import os
@@ -406,7 +424,20 @@ class WhatsAppOrchestrator:
         if result.get("action") in ("BOOK", "CANCEL"):
             session.memory_loaded = False
 
-        labels    = translate_labels(self.llm, session.language_code)
+        labels  = translate_labels(self.llm, session.language_code)
+        booking = result.get("result", {})
+        if result.get("action") == "BOOK" and booking.get("status") == "CONFIRMED":
+            # Card labels are translated above; the values underneath them
+            # (patient/doctor/hospital names, address, department) still
+            # need it too — display-only, the data stored in `booking`
+            # stays in English (see normalize_to_english) so records and
+            # family lookups stay consistent regardless of what language a
+            # booking was made in.
+            display_fields = ["patient_name", "doctor_name", "hospital_name", "hospital_address", "department"]
+            values = {f: booking[f] for f in display_fields if booking.get(f)}
+            localized = translate_booking_values(self.llm, values, session.language_code)
+            result = {**result, "result": {**booking, **localized}}
+
         formatted = format_booking_result(result, tool_args, labels)
         if formatted:
             return formatted
@@ -467,21 +498,36 @@ class WhatsAppOrchestrator:
             return execute_delay_report(tool_call.args["preview"], self.notifier)
         return {"error": "unknown tool"}
 
+    # Genuinely transient — a rate limit, a server-side hiccup, a timeout,
+    # or a connection drop. Worth retrying. Checked by exception TYPE (the
+    # openai client raises a distinct class per real HTTP status/failure
+    # mode), not by pattern-matching the message text — a text search for
+    # "rate" was matching the word "GenerateContentRequest" inside an
+    # unrelated 400 error, wasting two retries on a request that could
+    # never succeed no matter how many times it was resent.
+    _TRANSIENT_LLM_ERRORS = (
+        openai.RateLimitError, openai.InternalServerError,
+        openai.APITimeoutError, openai.APIConnectionError,
+    )
+
     def _llm_call_with_retry(self, history, tool_schemas, system_prompt, max_retries: int = 3):
         delay = 2
         for attempt in range(1, max_retries + 1):
             try:
                 return self.llm.run_agent(history, tool_schemas, system_prompt)
-            except Exception as exc:
-                msg = str(exc)
-                is_transient = "503" in msg or "429" in msg or "UNAVAILABLE" in msg or "rate" in msg.lower()
-                if is_transient and attempt < max_retries:
+            except self._TRANSIENT_LLM_ERRORS as exc:
+                if attempt < max_retries:
                     print(f"  [LLM transient error, retrying in {delay}s... ({attempt}/{max_retries})]", flush=True)
                     time.sleep(delay)
                     delay *= 2
                 else:
                     logger.error("LLM error: %s", exc)
                     return None
+            except Exception as exc:
+                # Not transient (e.g. a malformed request) — retrying
+                # won't help, fail immediately instead of wasting time.
+                logger.error("LLM error: %s", exc)
+                return None
 
     @traced("orchestrator._responder", run_type="chain", tags=["responder"])
     def _responder(self, text: str, context: OrchestratorContext):
@@ -491,7 +537,7 @@ class WhatsAppOrchestrator:
             except Exception:
                 pass
         context.session.history.append(ChatTurn(role=ChatRole.ASSISTANT, content=text))
-        context.session.history = context.session.history[-self.max_history_turns:]
+        context.session.history = _trim_history(context.session.history, self.max_history_turns)
         self.repository.save_session(context.session)
 
     def _log_tool(self, tool_call):
