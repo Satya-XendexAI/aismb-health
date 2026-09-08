@@ -35,7 +35,10 @@ PATIENT_SYSTEM_PROMPT = (
     "→ Ask specialization if unclear (optional: ask name)\n"
     "→ Call kg_retriever\n"
     "→ If result has found=false or doctors=[] — STOP immediately. Do NOT retry with a different query. Tell the patient: 'I couldn't find [doctor/specialty] at this hospital. Could you try a different name or specialty?'\n"
-    "→ If doctors found, show them with availability\n"
+    "→ If doctors found, list them in this exact format — one numbered line per doctor, never a plain bullet list, never dropping designation or fee just to vary the phrasing:\n"
+    "  1. *Dr. Name* (Designation) - Fee: ₹Amount\n"
+    "  2. *Dr. Name* (Designation) - Fee: ₹Amount\n"
+    "  Pull Designation and Fee straight from kg_retriever's result for each doctor — never invent them; only skip Fee for a specific doctor if kg_retriever didn't return one for them.\n"
     "→ Stop. Wait for patient choice.\n\n"
     
     "IF patient books appointment:\n"
@@ -228,6 +231,15 @@ TRANSLATE_LABELS_PROMPT = (
     "Translate each numbered WhatsApp UI label into {language_name}. "
     "Reply with the same numbers, one short translation per line, "
     "nothing else — no explanation, no extra text."
+)
+
+TRANSLATE_BOOKING_VALUES_PROMPT = (
+    "Convert each numbered value into {language_name} for display to a "
+    "patient. Person names and place names: transliterate them "
+    "phonetically into that language's script — never translate the "
+    "meaning of a name. Anything else (e.g. a medical department name): "
+    "translate by meaning. Reply with the same numbers, one converted "
+    "value per line, nothing else — no explanation, no extra text."
 )
 
 NORMALIZE_TO_ENGLISH_PROMPT = (
