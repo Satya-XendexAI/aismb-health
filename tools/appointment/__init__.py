@@ -38,8 +38,13 @@ def list_appointments(hospital_id: str, requester_phone: str, patient_name: str 
     return {"appointments": rows}
 
 
-def list_available_slots(hospital_id: str, doctor_id: str, date: str) -> dict:
+def list_available_slots(hospital_id: str, doctor_id: str, date: str, offset: int = 0) -> dict:
     with database.get_connection() as conn:
-        rows = database.find_available_slots(conn, doctor_id, hospital_id, date)
+        rows, has_more = database.find_available_slots(conn, doctor_id, hospital_id, date, offset=offset)
     slots = [{**row, "slot_id": str(row["slot_id"])} for row in rows]
-    return {"slots": slots}
+    return {
+        "slots": slots,
+        "has_more": has_more,
+        # exact cursor for "show me more" — never left for the LLM to compute itself
+        "next_offset": offset + len(slots) if has_more else None,
+    }

@@ -35,6 +35,22 @@ def list_hospitals(conn):
         return cur.fetchall()
 
 
+def get_live_hospital(conn):
+    """The one hospital currently receiving messages on our single real
+    WhatsApp Business number — see migrations/0007. Returns None if none
+    is flagged live; callers must fail closed on None, never default to
+    a particular hospital."""
+    sql = """
+        SELECT hospital_id, name, booking_mode, address, city
+        FROM hospitals
+        WHERE is_live_number = true
+        LIMIT 1
+    """
+    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+        cur.execute(sql)
+        return cur.fetchone()
+
+
 def get_hospital(conn, hospital_id):
     sql = """
         SELECT hospital_id, name, booking_mode, address, city
@@ -48,7 +64,7 @@ def get_hospital(conn, hospital_id):
 
 def get_doctor(conn, doctor_id, hospital_id):
     sql = """
-        SELECT doctor_id, hospital_id, name, is_active,
+        SELECT doctor_id, hospital_id, name, is_active, specialization,
                avg_checkin_time, avg_consultation_minutes, fee
         FROM doctors
         WHERE doctor_id = %s
@@ -304,9 +320,15 @@ def shift_session_start(conn, session_id: str, delay_minutes: int):
 # in docs/slot-based-appointment-implementation-guide.md §1).
 # ═══════════════════════════════════════════════════════════════════════
 
-def find_available_slots(conn, doctor_id, hospital_id, date, limit=5):
-    """Next N AVAILABLE slots for a doctor on a given date, future-only —
-    excludes today's slots whose start_time has already passed."""
+def find_available_slots(conn, doctor_id, hospital_id, date, limit=5, offset=0):
+    """Page through a doctor's AVAILABLE slots on a given date, future-only
+    (excludes today's slots whose start_time has already passed).
+
+    Returns (rows, has_more) — fetches one extra row beyond `limit` to
+    detect whether more exist past this page, instead of a separate COUNT
+    query. `offset` is the pagination cursor: 0 for the first page, then
+    whatever this call's returned row count was, so a caller can always
+    ask for "the next page" without needing to know the total up front."""
     sql = """
         SELECT slot_id, date::text AS date, start_time::text AS start_time,
                end_time::text AS end_time
@@ -315,11 +337,13 @@ def find_available_slots(conn, doctor_id, hospital_id, date, limit=5):
           AND status = 'AVAILABLE'
           AND (date > CURRENT_DATE OR (date = CURRENT_DATE AND start_time > CURRENT_TIME))
         ORDER BY start_time
-        LIMIT %s
+        LIMIT %s OFFSET %s
     """
     with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(sql, (str(doctor_id), str(hospital_id), date, limit))
-        return cur.fetchall()
+        cur.execute(sql, (str(doctor_id), str(hospital_id), date, limit + 1, offset))
+        rows = cur.fetchall()
+    has_more = len(rows) > limit
+    return rows[:limit], has_more
 
 
 def lock_slot(conn, slot_id, hospital_id):

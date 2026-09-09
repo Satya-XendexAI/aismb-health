@@ -331,6 +331,7 @@ class WhatsAppOrchestrator:
                 hospital_id=context.wa_message.hospital_id,
                 doctor_id=tool_call.args["doctor_id"],
                 date=tool_call.args["date"],
+                offset=tool_call.args.get("offset", 0),
             )
         if name == "kg_retriever":
             from tools.kg_retriever import retrieve_context

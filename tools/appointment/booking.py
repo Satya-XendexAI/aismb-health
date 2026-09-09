@@ -37,6 +37,15 @@ def _candidate(appointment) -> dict:
     }
 
 
+def _resolve_department(doctor, payload_department) -> str:
+    """The doctor's own specialization (from `doctors`) is authoritative —
+    payload.department is LLM-supplied free text that can drift from the
+    doctor actually being booked (e.g. carried over from an earlier part
+    of the conversation about a different specialty). Only falls back to
+    the payload value if this doctor has no specialization on record."""
+    return doctor.get("specialization") or payload_department
+
+
 def _resolve_booking_identity(conn, payload):
     """Doctor + date + phone validation, then family-identity resolution —
     identical for every booking mode, so book_token() and book_slot() both
@@ -152,6 +161,7 @@ def book_token(conn, payload, hospital):
     doctor, patient, error = _resolve_booking_identity(conn, payload)
     if error:
         return error
+    department = _resolve_department(doctor, payload.department)
 
     # Get or create today's session
     session = db.get_or_create_today_session(
@@ -179,7 +189,7 @@ def book_token(conn, payload, hospital):
             patient_id=patient["patient_id"],
             doctor_id=payload.doctor_id,
             hospital_id=payload.hospital_id,
-            department=payload.department,
+            department=department,
         )
     except psycopg2.errors.UniqueViolation as e:
         if e.diag.constraint_name != "uq_tokens_waiting_patient_session":
@@ -204,7 +214,7 @@ def book_token(conn, payload, hospital):
         patient_name=patient["name"],
         relation_to_requester=patient["relation_to_requester"],
         doctor_name=doctor["name"],
-        department=payload.department,
+        department=department,
         hospital_name=hospital["name"],
         hospital_address=hospital.get("address"),
         fee=doctor.get("fee"),
@@ -244,6 +254,7 @@ def book_slot(conn, payload, hospital):
     doctor, patient, error = _resolve_booking_identity(conn, payload)
     if error:
         return error
+    department = _resolve_department(doctor, payload.department)
 
     if not payload.slot_id:
         return ErrorResult(status="ERROR", error_code="SLOT_REQUIRED",
@@ -278,14 +289,15 @@ def book_slot(conn, payload, hospital):
     appt = db.insert_appointment(
         conn, hospital_id=slot["hospital_id"], patient_id=patient["patient_id"],
         doctor_id=slot["doctor_id"], slot_id=slot["slot_id"],
-        department=payload.department, appointment_date=slot["date"],
+        department=department, appointment_date=slot["date"],
     )
     db.touch_family_member(conn, patient["patient_id"])
 
     return SlotBookingConfirmation(
         status="CONFIRMED", appointment_id=str(appt["appointment_id"]),
         patient_name=patient["name"], relation_to_requester=patient["relation_to_requester"],
-        doctor_name=doctor["name"], department=payload.department, hospital_name=hospital["name"],
+        doctor_name=doctor["name"], department=department, hospital_name=hospital["name"],
+        hospital_address=hospital.get("address"),
         slot_date=str(slot["date"]), slot_time=str(slot["start_time"]), fee=doctor.get("fee"),
     )
 
@@ -385,7 +397,9 @@ def reschedule_slot(conn, payload, hospital):
     return SlotBookingConfirmation(
         status="CONFIRMED", appointment_id=str(current["appointment_id"]),
         patient_name=patient["name"], relation_to_requester=patient["relation_to_requester"],
-        doctor_name=doctor["name"], department=current["department"], hospital_name=hospital["name"],
+        doctor_name=doctor["name"], department=_resolve_department(doctor, current["department"]),
+        hospital_name=hospital["name"],
+        hospital_address=hospital.get("address"),
         slot_date=str(new_slot["date"]), slot_time=str(new_slot["start_time"]), fee=doctor.get("fee"),
         was_rescheduled=True,
     )

@@ -1,6 +1,16 @@
 import re
 from collections import defaultdict
+from datetime import datetime
 from typing import List
+
+
+def _format_time_12h(raw: str) -> str:
+    """'09:30:00' -> '9:30 AM'. Falls back to the raw string if it's not
+    in the expected HH:MM:SS shape, rather than raising on unexpected input."""
+    try:
+        return datetime.strptime(raw, "%H:%M:%S").strftime("%I:%M %p").lstrip("0")
+    except (ValueError, TypeError):
+        return raw
 
 
 def doctor_display_name(args: dict) -> str:
@@ -44,6 +54,15 @@ def format_booking_result(result: dict, tool_args: dict) -> str | None:
     return _format_token_confirmation(booking, tool_args)
 
 
+def _patient_name_line(booking: dict, tool_args: dict) -> str:
+    """Shared by both confirmation cards so the two layouts stay in sync —
+    same field, same position, same relation-suffix rule as describe_tool()."""
+    name     = booking.get("patient_name", tool_args.get("patient_name", ""))
+    relation = booking.get("relation_to_requester", tool_args.get("relation_to_requester", "self"))
+    suffix   = f" ({relation})" if relation and relation != "self" else ""
+    return f"🙋 *Patient Name:* {name}{suffix}"
+
+
 def _format_token_confirmation(booking: dict, tool_args: dict) -> str:
     token    = booking.get("token_number", "?")
     doctor   = booking.get("doctor_name", tool_args.get("doctor_name", "the doctor"))
@@ -56,6 +75,7 @@ def _format_token_confirmation(booking: dict, tool_args: dict) -> str:
 
     lines = ["✅ *Appointment Confirmed*\n"]
     lines.append(f"🎫 *Token:* #{token}")
+    lines.append(_patient_name_line(booking, tool_args))
     lines.append(f"👨‍⚕️ *Doctor:* {doctor}")
     if dept:
         lines.append(f"🏛 *Department:* {dept}")
@@ -72,23 +92,30 @@ def _format_token_confirmation(booking: dict, tool_args: dict) -> str:
 
 
 def _format_slot_confirmation(booking: dict, tool_args: dict) -> str:
+    """Same field order/layout as _format_token_confirmation — the only
+    structural difference is this card's identifier line is the slot's
+    own time instead of a queue token number, since in SLOT mode the
+    booked time *is* the reporting time (no separate ETA to show)."""
     doctor    = booking.get("doctor_name", tool_args.get("doctor_name", "the doctor"))
     dept      = booking.get("department", "")
     hospital  = booking.get("hospital_name", "")
+    address   = booking.get("hospital_address", "")
     slot_date = booking.get("slot_date", tool_args.get("date", "today"))
     slot_time = booking.get("slot_time", "")
     fee       = booking.get("fee")
     header    = "Appointment Rescheduled" if booking.get("was_rescheduled") else "Appointment Confirmed"
 
     lines = [f"✅ *{header}*\n"]
+    lines.append(f"⏰ *Time:* {_format_time_12h(slot_time)}")
+    lines.append(_patient_name_line(booking, tool_args))
     lines.append(f"👨‍⚕️ *Doctor:* {doctor}")
     if dept:
         lines.append(f"🏛 *Department:* {dept}")
     if hospital:
         lines.append(f"🏥 *Hospital:* {hospital}")
+    if address:
+        lines.append(f"📍 *Address:* {address}")
     lines.append(f"📅 *Date:* {slot_date}")
-    if slot_time:
-        lines.append(f"⏰ *Time:* {slot_time}")
     if fee:
         lines.append(f"💰 *Fee:* ₹{int(fee)}")
     return "\n".join(lines)

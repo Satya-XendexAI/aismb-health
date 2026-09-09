@@ -40,6 +40,7 @@ class SlotBookingConfirmation(BaseModel):
     doctor_name:          str
     department:           str
     hospital_name:        str
+    hospital_address:     Optional[str]   = None
     slot_date:            str
     slot_time:            str
     fee:                  Optional[float] = None

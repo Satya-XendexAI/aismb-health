@@ -22,6 +22,7 @@ from fastapi import FastAPI, Request, BackgroundTasks, Query
 from fastapi.responses import PlainTextResponse, JSONResponse
 
 from orchestrator import WhatsAppOrchestrator, InMemoryRepository, GeminiLLMAdapter, WAMessage
+from tools.appointment import database as appt_db
 
 load_dotenv()
 logging.basicConfig(level=logging.ERROR, format="%(name)s %(levelname)s: %(message)s")
@@ -29,7 +30,6 @@ logger = logging.getLogger(__name__)
 
 # ── Config ──────────────────────────────────────────────────────────────
 
-HOSPITAL_ID     = "glngs-chn"
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "")
 ACCESS_TOKEN    = os.getenv("ACCESS_TOKEN", "")
 VERIFY_TOKEN    = os.getenv("VERIFY_TOKEN", "")
@@ -129,11 +129,16 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
 
     incoming = extract_text_message(json.loads(body))
     if incoming:
+        with appt_db.get_connection() as conn:
+            hospital = appt_db.get_live_hospital(conn)
+        if not hospital:
+            logger.error("No hospital is currently flagged is_live_number=true — dropping message.")
+            return JSONResponse({"status": "ok"})
         wa_message = WAMessage(
             from_number=incoming["from_number"],
             message_id=incoming["message_id"],
             text=incoming["text"],
-            hospital_id=HOSPITAL_ID,
+            hospital_id=hospital["hospital_id"],
         )
         background_tasks.add_task(orchestrator.handle_message, wa_message)
 

@@ -6,20 +6,21 @@ Everything below the line is **already implemented and tested** this session (sl
 
 ## 🔴 Must fix before Mithra can receive real WhatsApp traffic
 
-### 1. `whatsapp.py` only routes to one hospital
-`HOSPITAL_ID = "glngs-chn"` is still hardcoded ([whatsapp.py:32](../whatsapp.py#L32)), and `extract_text_message()` never reads Meta's `metadata.phone_number_id` ([whatsapp.py:72-86](../whatsapp.py#L72)) — every inbound webhook, regardless of which hospital's WhatsApp number it hit, is tagged `glngs-chn`. Mithra cannot receive a single real message until this changes.
+### 1. `whatsapp.py` inbound routing — ✅ RESOLVED, via a simpler mechanism than originally planned
+Originally this item called for `phone_number_id`-based routing (a real, separate WhatsApp Business number for Mithra). Since this doc was first written, a **simpler alternative shipped instead**: `hospitals.is_live_number` (see `migrations/0007_add_live_hospital_flag.sql`) — one boolean flag, exactly one hospital `true` at a time, looked up fresh on every message in `whatsapp.py`'s `receive_webhook()` ([whatsapp.py:132-136](../whatsapp.py#L132)). No more hardcoded `HOSPITAL_ID` constant. Switching which hospital your one real number represents is now two `UPDATE` statements, no code change, no restart:
+```sql
+UPDATE hospitals SET is_live_number = false WHERE hospital_id = 'glngs-chn';
+UPDATE hospitals SET is_live_number = true  WHERE hospital_id = 'mit-lbn';
+```
+Tested both directions plus the fail-closed "nobody live" case against the real FastAPI app.
 
-**Needs, once you have Mithra's real WhatsApp Business number / `phone_number_id`:**
-- `config/doctors.json` gains a `"hospitals"` block: `{"<phone_number_id>": {"hospital_id": "...", "name": "..."}}`, one entry per hospital.
-- Every doctor/admin entry in `config/doctors.json` gains a `hospital_id` field — `get_role`/`get_doctor_config`/`get_admin_config` ([orchestrator/session.py](../orchestrator/session.py)) currently classify by phone number alone, with no hospital filter. Without this, a Chaitanya doctor messaging via Mithra's number would be misclassified as `Role.DOCTOR` there too.
-- `whatsapp.py`'s `extract_text_message()` extracts `phone_number_id`; `receive_webhook()` looks up `hospital_id` from the new map instead of the constant. Full design already written up in `docs/multi-hospital-identity-routing-plan.md` — not yet applied to actual code.
-- `orchestrator/core.py`'s 4 call sites that pass `from_number` alone to `get_role`/`get_doctor_config`/`get_admin_config` need `hospital_id` added (see that plan doc's §4 for exact line numbers, though they'll have shifted since it was written).
+**Important limitation this doesn't remove:** only **one** hospital can ever be live at a time on this one number — this is a testing/staging mechanism, not true simultaneous multi-hospital service. If you eventually want **both** hospitals receiving real traffic *at the same time*, you're back to needing a second real WhatsApp number and the original `phone_number_id`-based plan in `docs/multi-hospital-identity-routing-plan.md` — including its `get_role`/`get_doctor_config`/`get_admin_config` hospital-scoping fix, which is genuinely unneeded right now (only one hospital is ever active globally, so there's no cross-hospital doctor/admin ambiguity to resolve) but would become necessary again at that point.
 
-### 2. Outbound replies are also single-hospital
-`PHONE_NUMBER_ID`/`GRAPH_API_URL`/`ACCESS_TOKEN` are built once at module load from one set of env vars ([whatsapp.py:33-37](../whatsapp.py#L33)). Even after inbound routing is fixed, `WhatsAppNotifier.send()` would still reply to a Mithra patient *from Chaitanya's number*. Needs the send path to pick the right `phone_number_id`/`access_token` per hospital (per-hospital values in `config/doctors.json`'s `"hospitals"` block, or hospital-specific env vars — pick one).
+### 2. Outbound replies are also single-hospital — ✅ N/A under the current approach
+This was originally a real gap (replying to a Mithra patient from Chaitanya's number). With the `is_live_number` approach, it's moot: it's the same one physical number and token sending regardless of which hospital is live, so there's nothing to fix here **unless/until** you get a second real number for true simultaneous multi-hospital service (see the limitation above) — at which point this becomes relevant again.
 
-### 3. No recurring slot-generation job
-Mithra's slots were seeded by a one-off migration (`migrations/0005_mithra_generate_slots.sql`) covering a fixed 7-day window from whenever it was run. There is **no scheduled process** that keeps generating the next day's slots as the window rolls forward. Left as-is, Mithra runs out of bookable slots within days of going live, and every booking attempt fails with `SLOT_UNAVAILABLE` (or `list_available_slots` just returns empty, indistinguishable from "no availability" to the patient). Needs a daily/weekly job (cron, scheduled task, whatever your deploy target supports) that runs the equivalent of `migrations/0005`'s `INSERT ... ON CONFLICT DO NOTHING` logic per active SLOT-mode hospital.
+### 3. No recurring slot-generation job — still open
+`migrations/0006_regenerate_slots_rolling_window.sql` was run manually (10-day window, all SLOT-mode hospitals, doctor-hours-driven — an improvement over the original `0005`, which only covered Mithra with hardcoded hours). But it's still a **one-off manual run**, not a scheduled job. Nothing re-runs it automatically as the window ages. Needs a daily/weekly cron (or whatever your deploy target supports) pointed at that same script's `INSERT ... ON CONFLICT DO NOTHING` logic.
 
 ---
 
@@ -54,8 +55,8 @@ If any of these needs a different test date, check `SELECT DISTINCT date FROM sl
 
 | # | Item | Blocks Mithra going live on real WhatsApp? | Effort |
 |---|---|---|---|
-| 1 | `whatsapp.py` inbound routing | Yes | Medium — needs Mithra's real `phone_number_id` first |
-| 2 | Outbound per-hospital sending | Yes | Small, same PR as #1 |
+| 1 | `whatsapp.py` inbound routing | ✅ Resolved (single-number, one-at-a-time) | Only re-opens if you need *simultaneous* multi-hospital service |
+| 2 | Outbound per-hospital sending | ✅ N/A under current approach | Same re-open condition as #1 |
 | 3 | Recurring slot-generation job | Yes (within days) | Small — one scheduled script |
 | 4 | Session persistence | Depends on deploy target | Medium, only if needed |
 | 5 | `config/kg_tenants.py` maintenance | No | None now — process note only |

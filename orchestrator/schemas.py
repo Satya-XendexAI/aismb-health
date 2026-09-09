@@ -132,15 +132,22 @@ _list_available_slots_schema = {
     "function": {
         "name": "list_available_slots",
         "description": (
-            "List a doctor's next available time slots on a given date. SLOT-mode "
-            "hospitals only (see SESSION INFO's Booking mode) — call this before "
-            "booking or rescheduling so the patient can pick a time."
+            "List a doctor's next available time slots on a given date, one page at a "
+            "time (5 per call). SLOT-mode hospitals only (see SESSION INFO's Booking "
+            "mode) — call this before booking or rescheduling so the patient can pick "
+            "a time. The result's has_more/next_offset tell you whether there are "
+            "more slots than shown — pass next_offset back as `offset` to fetch the "
+            "next page if the patient asks for more options."
         ),
         "parameters": {
             "type": "object",
             "properties": {
                 "doctor_id": {"type": "string"},
                 "date":      {"type": "string", "description": "YYYY-MM-DD"},
+                "offset":    {"type": "integer",
+                             "description": "Pagination cursor. Omit or use 0 for the first page. "
+                                            "For a later page, use the next_offset value from a "
+                                            "prior call's result — never compute this yourself."},
             },
             "required": ["doctor_id", "date"],
         },
