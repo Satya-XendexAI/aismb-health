@@ -1,5 +1,6 @@
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional, List, Literal
 
@@ -43,10 +44,11 @@ class ChatTurn:
 
 @dataclass
 class WAMessage:
-    from_number: str
-    message_id:  str
-    text:        str
-    hospital_id: str
+    from_number:   str
+    message_id:    str
+    text:          str
+    hospital_id:   str
+    language_code: str | None = None   # e.g. "te-IN", from voice transcription; None for typed text
 
 @dataclass
 class PlanAction:
@@ -79,6 +81,8 @@ class Session:
     memory_loaded:   bool = False
     memory_context:  str  = ""
     pending_plan:    Optional[List["PlanAction"]] = None
+    language_code:   str  = "en"   # sticks once a voice message sets it; drives template translation
+    last_active_at:  datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 @dataclass
 class AgentResponse:

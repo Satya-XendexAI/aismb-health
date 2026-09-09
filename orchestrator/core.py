@@ -2,7 +2,8 @@ import uuid
 import json
 import time
 import logging
-from datetime import date
+import openai
+from datetime import date, datetime, timedelta, timezone
 from typing import List
 
 from models.session import (
@@ -12,13 +13,36 @@ from models.session import (
 from orchestrator.schemas import (
     PATIENT_TOOLS, PATIENT_TOOLS_WARMUP, DOCTOR_TOOLS, ADMIN_TOOLS, ROLE_PERMISSIONS,
 )
-from orchestrator.utils import detect_booking_intent, is_affirmative, is_negative
-from orchestrator.formatters import format_booking_result, chunk_text
+from orchestrator.utils import detect_booking_intent, looks_like_english
+from orchestrator.formatters import format_booking_result, describe_tool, chunk_text
+from orchestrator.llm import (
+    translate_static, translate_text, translate_labels, translate_booking_values,
+    normalize_to_english, resolve_confirmation,
+)
 from orchestrator import gates
 from prompts.system import PATIENT_SYSTEM_PROMPT, DOCTOR_SYSTEM_PROMPT, ADMIN_SYSTEM_PROMPT
+from orchestrator.tracing import traced, add_metadata
 
 logger = logging.getLogger(__name__)
 
+
+def _trim_history(history: list, max_turns: int) -> list:
+    """Keep the last max_turns entries, then drop any leading TOOL_RESULT
+    turns left dangling by that cut.
+
+    The LLM API requires a "tool" role message to immediately follow the
+    "assistant" message that proposed it (see GeminiLLMAdapter._build_
+    messages). A plain slice can cut a tool-call/tool-result pair apart,
+    keeping the result but dropping the assistant turn that proposed it —
+    that leftover result is an unpaired, invalid message the API rejects
+    outright ("function_response.name: Name cannot be empty")."""
+    trimmed = history[-max_turns:]
+    while trimmed and trimmed[0].role == ChatRole.TOOL_RESULT:
+        trimmed = trimmed[1:]
+    return trimmed
+
+
+import os
 
 class WhatsAppOrchestrator:
     def __init__(
@@ -27,8 +51,9 @@ class WhatsAppOrchestrator:
         notifier,
         repository,
         fallback_text:     str = "I'm sorry, I couldn't process that. Please try again.",
-        max_iterations:    int = 5,
+        max_iterations:    int = int(os.getenv("MAX_ITERATIONS", "5")),
         max_history_turns: int = 10,
+        session_idle_reset_hours: float = float(os.getenv("SESSION_IDLE_RESET_HOURS", "6")),
     ):
         self.llm               = llm
         self.notifier          = notifier
@@ -36,20 +61,32 @@ class WhatsAppOrchestrator:
         self.fallback_text     = fallback_text
         self.max_iterations    = max_iterations
         self.max_history_turns = max_history_turns
+        self.session_idle_reset = timedelta(hours=session_idle_reset_hours)
 
+    @traced("WhatsAppOrchestrator.handle_message", run_type="chain", tags=["orchestrator", "agent"])
     def handle_message(self, wa_message: WAMessage):
+        add_metadata(
+            hospital_id=wa_message.hospital_id,
+            from_number=wa_message.from_number,
+        )
         try:
             self._handle_message_inner(wa_message)
         except Exception as exc:
             logger.error("Unhandled error in handle_message: %s", exc, exc_info=True)
+            text = self.fallback_text
             try:
-                self.notifier.send(wa_message.from_number, self.fallback_text)
+                text = translate_static(self.llm, self.fallback_text, wa_message.language_code)
+            except Exception:
+                pass
+            try:
+                self.notifier.send(wa_message.from_number, text)
             except Exception:
                 pass
 
     def _handle_message_inner(self, wa_message: WAMessage):
         context = self._hydrate(wa_message)
         session = context.session
+        add_metadata(role=session.role.value, state=session.state.value)
 
         if session.state == SessionState.AWAITING_CONFIRM:
             self._handle_awaiting_confirm(wa_message, context)
@@ -65,16 +102,20 @@ class WhatsAppOrchestrator:
 
     def _handle_awaiting_confirm(self, wa_message, context):
         session = context.session
+        pending = session.pending_tool
+        pending_action = describe_tool(pending) if pending else None
+        recent_context = self._recent_conversation_text(session)
+        reply = resolve_confirmation(self.llm, wa_message.text, recent_context, pending_action)
 
         # ── Plan-gate (admin) ──────────────────────────────────────────────────
         if session.pending_plan is not None:
-            if is_affirmative(wa_message.text):
+            if reply == "yes":
                 plan = session.pending_plan
                 session.pending_plan = None
                 session.state        = SessionState.IDLE
                 self.repository.save_session(session)
                 gates.execute_approved_plan(plan, context, self.notifier)
-            elif is_negative(wa_message.text):
+            elif reply == "no":
                 session.pending_plan = None
                 session.state        = SessionState.IDLE
                 self.repository.save_session(session)
@@ -84,26 +125,19 @@ class WhatsAppOrchestrator:
             return
 
         # ── Single-tool gate (booking / delay) ─────────────────────────────────
-        pending = session.pending_tool
-        is_cancel_action = (
-            pending and
-            pending.tool_name == "appointment" and
-            pending.args.get("action") == "CANCEL"
-        )
-        text_is_affirmative = is_affirmative(wa_message.text) or (
-            is_cancel_action and "cancel" in wa_message.text.strip().lower()
-        )
-        text_is_negative = is_negative(wa_message.text) and not (
-            is_cancel_action and "cancel" in wa_message.text.strip().lower()
-        )
-
-        if text_is_affirmative:
-            tool_call            = session.pending_tool
+        if reply == "yes":
+            tool_call            = pending
             session.pending_tool = None
             session.state        = SessionState.IDLE
             self.repository.save_session(session)
             self._log_tool(tool_call)
-            result = self._execute_tool(tool_call, context)
+            try:
+                result = self._execute_tool(tool_call, context)
+            except Exception as tool_exc:
+                logger.error("Tool %s failed at confirm-gate: %s", tool_call.tool_name, tool_exc, exc_info=True)
+                text = translate_static(self.llm, "Sorry, something went wrong completing that. Please try again.", session.language_code)
+                self._responder(text, context)
+                return
             session.history.append(ChatTurn(
                 role=ChatRole.TOOL_RESULT,
                 content=json.dumps(result),
@@ -119,9 +153,7 @@ class WhatsAppOrchestrator:
                 self._responder(msg, context)
                 return
             if tool_call.tool_name == "appointment":
-                if result.get("action") in ("BOOK", "CANCEL", "RESCHEDULE"):
-                    session.memory_loaded = False
-                formatted = format_booking_result(result, tool_call.args)
+                formatted = self._format_appointment_response(result, tool_call.args, session)
                 if formatted:
                     self._responder(formatted, context)
                     return
@@ -129,19 +161,24 @@ class WhatsAppOrchestrator:
             system_prompt, tool_schemas = self._build_prompt_and_tools(wa_message, session)
             self._react_loop(context, system_prompt, tool_schemas)
 
-        elif text_is_negative:
-            session.pending_tool = None
-            session.state        = SessionState.IDLE
+        elif reply == "no":
+            self._resolve_pending_tool_as_not_executed(session, "Cancelled — the patient declined.")
+            session.state = SessionState.IDLE
             session.history.append(ChatTurn(role=ChatRole.USER, content=wa_message.text))
-            self._responder("Understood. Your request has been cancelled.", context)
+            self._responder(
+                translate_static(self.llm, "Understood. Your request has been cancelled.", session.language_code),
+                context,
+            )
 
         else:
             # Not a plain yes/no — treat it as new information (e.g. a
             # correction like "tomorrow instead") and let the LLM, which
             # still has the pending request in its own history, reconsider
             # rather than mechanically replaying a possibly-wrong tool call.
-            session.pending_tool = None
-            session.state        = SessionState.IDLE
+            self._resolve_pending_tool_as_not_executed(
+                session, "Not executed — the patient replied with something other than a plain yes/no."
+            )
+            session.state = SessionState.IDLE
             session.history.append(ChatTurn(role=ChatRole.USER, content=wa_message.text))
             system_prompt, tool_schemas = self._build_prompt_and_tools(wa_message, session)
             self._react_loop(context, system_prompt, tool_schemas)
@@ -185,6 +222,10 @@ class WhatsAppOrchestrator:
     def _react_loop(self, context, system_prompt, tool_schemas):
         session    = context.session
         final_text = self.fallback_text
+        # Only our own hardcoded fallback strings need translating at the end —
+        # LLM-generated text already matches the patient's language, and the
+        # booking card is already localized via translate_labels() below.
+        needs_translation = True
         kg_empty_streak = 0
 
         for _ in range(self.max_iterations):
@@ -195,6 +236,15 @@ class WhatsAppOrchestrator:
 
             if agent_response.type == AgentResponseType.TEXT:
                 final_text = agent_response.text
+                needs_translation = False
+                # The system prompt asks the model to always reply in the
+                # patient's language, but that's a soft instruction it can
+                # (and occasionally does) ignore — catch a plain-English
+                # reply in a non-English session and translate it ourselves
+                # rather than letting it slip through untranslated.
+                lang_prefix = (session.language_code or "en").split("-")[0].lower()
+                if lang_prefix != "en" and looks_like_english(final_text):
+                    final_text = translate_text(self.llm, final_text, session.language_code)
                 break
 
             session.history.append(ChatTurn(
@@ -215,12 +265,16 @@ class WhatsAppOrchestrator:
                 gates.interrupt_delay(agent_response.tool_call.args, context, doc_cfg, self.repository, self.notifier)
                 return
 
+            if agent_response.tool_call.tool_name == "appointment":
+                self._normalize_appointment_args(agent_response.tool_call)
+
             gate_result = self._gate(agent_response.tool_call, context)
             if gate_result.status == GateStatus.FORBIDDEN:
-                self._responder("Sorry, you don't have permission to perform this action.", context)
+                text = translate_static(self.llm, "Sorry, you don't have permission to perform this action.", session.language_code)
+                self._responder(text, context)
                 return
             if gate_result.status == GateStatus.CONFIRM_REQUIRED:
-                gates.interrupt_tool(agent_response.tool_call, context, self.repository, self.notifier)
+                gates.interrupt_tool(agent_response.tool_call, context, self.repository, self.notifier, self.llm)
                 return
 
             self._log_tool(agent_response.tool_call)
@@ -249,17 +303,19 @@ class WhatsAppOrchestrator:
                     kg_empty_streak = 0
 
             if agent_response.tool_call.tool_name == "appointment":
-                if result.get("action") in ("BOOK", "CANCEL", "RESCHEDULE"):
-                    session.memory_loaded = False
-                formatted = format_booking_result(result, agent_response.tool_call.args)
+                formatted = self._format_appointment_response(result, agent_response.tool_call.args, session)
                 if formatted:
                     final_text = formatted
+                    needs_translation = False
                     break
 
+        if needs_translation:
+            final_text = translate_static(self.llm, final_text, session.language_code)
         self._responder(final_text, context)
 
     def _hydrate(self, wa_message: WAMessage) -> OrchestratorContext:
         session = self.repository.get_session(wa_message.hospital_id, wa_message.from_number)
+        now = datetime.now(timezone.utc)
         if session is None:
             session = Session(
                 session_id   = str(uuid.uuid4()),
@@ -271,8 +327,47 @@ class WhatsAppOrchestrator:
                 role         = self.repository.get_role(wa_message.from_number),
             )
             session.booking_mode, session.hospital_name = self._lookup_hospital_meta(wa_message.hospital_id)
+        elif now - session.last_active_at > self.session_idle_reset:
+            # The session store has no concept of "today" vs. "last week" —
+            # a phone number that messaged once, ever, stays "mid-conversation"
+            # forever (turn_count never resets), so the one-time greeting
+            # never fires again and the bot jumps straight into follow-up
+            # mode even though the patient is starting a fresh chat. Treat a
+            # long enough gap as the start of a new conversation.
+            session.state          = SessionState.IDLE
+            session.history        = []
+            session.pending_tool   = None
+            session.pending_plan   = None
+            session.turn_count     = 0
+            session.booking_intent = False
+            session.memory_loaded  = False
+            session.memory_context = ""
+        session.last_active_at = now
+        if wa_message.language_code:
+            session.language_code = wa_message.language_code
         self.repository.save_session(session)
         return OrchestratorContext(wa_message, session)
+
+    def _recent_conversation_text(self, session, max_turns: int = 6) -> str:
+        """Plain-text summary of the last max_turns USER/ASSISTANT turns —
+        tool calls and tool results deliberately excluded. This feeds a small
+        side call (resolve_confirmation), not the main tool-calling loop, so
+        it only needs readable conversation, never the raw tool-call/tool-
+        result pairing the main loop's history depends on.
+
+        Walks history backwards and stops once max_turns *conversational*
+        lines are found — not the last max_turns raw history entries, which
+        would undercount whenever tool-call/tool-result turns are interleaved
+        (every confirm-gate booking proposal leaves at least one such turn)."""
+        lines = []
+        for turn in reversed(session.history):
+            if turn.role == ChatRole.USER:
+                lines.append(f"Patient: {turn.content}")
+            elif turn.role == ChatRole.ASSISTANT and not turn.tool_call:
+                lines.append(f"Assistant: {turn.content}")
+            if len(lines) == max_turns:
+                break
+        return "\n".join(reversed(lines))
 
     def _lookup_hospital_meta(self, hospital_id: str) -> tuple[str, str]:
         """(booking_mode, name) looked up once per new session (same
@@ -300,6 +395,84 @@ class WhatsAppOrchestrator:
             logger.warning("memory preload failed: %s", exc)
             session.memory_loaded = True
 
+    def _resolve_pending_tool_as_not_executed(self, session, reason: str):
+        """Close out session.pending_tool with an explicit NOT_EXECUTED result
+        instead of just dropping it.
+
+        The tool call was already written into session.history as an
+        unpaired assistant tool-call turn back when _react_loop first
+        proposed it (before the confirm-gate deferred it) — see
+        _react_loop's history.append() right before the CONFIRM_REQUIRED
+        check. If we clear pending_tool without ever resolving that turn,
+        the next LLM call sees its own "I'm calling book()" turn with no
+        result and, left to guess, tends to assume it succeeded and
+        narrates a fabricated confirmation instead of a real one — nothing
+        gets written to the database, but the patient is told it was
+        booked. Appending this turn keeps the tool-call/tool-result pairing
+        intact and tells the model explicitly that nothing happened.
+
+        Only safe for "appointment": interrupt_tool() (gates.py) hands
+        pending_tool the *same* ToolCall object the LLM proposed, so its
+        tool_use_id matches the dangling history turn. report_delay's
+        pending_tool (built fresh in interrupt_delay() with a new random
+        tool_use_id) does NOT match its original history turn, so
+        resolving it here would append an orphaned tool-result the API
+        would reject — for that case we fall back to the old plain clear."""
+        tool_call = session.pending_tool
+        session.pending_tool = None
+        if tool_call and tool_call.tool_name == "appointment":
+            session.history.append(ChatTurn(
+                role=ChatRole.TOOL_RESULT,
+                content=json.dumps({"status": "NOT_EXECUTED", "reason": reason}),
+                tool_call=tool_call,
+            ))
+
+    def _normalize_appointment_args(self, tool_call):
+        """Store/lookup patient data in English regardless of what language it
+        was spoken in — keeps hospital records consistent and lets
+        family-member lookups (matched by name) work across conversations
+        in different languages."""
+        for field in ("patient_name", "patient_location", "symptoms"):
+            if tool_call.args.get(field):
+                tool_call.args[field] = normalize_to_english(self.llm, tool_call.args[field])
+
+    def _format_appointment_response(self, result: dict, tool_args: dict, session) -> str | None:
+        """Render a confirmation card for a successful booking or cancellation,
+        translated into the session's language. Returns None for any other
+        outcome (errors, etc.) so the caller lets the LLM narrate it instead.
+
+        Both BOOK and CANCEL go through here so neither one falls back to the
+        LLM freely summarizing raw tool JSON itself — that fallback isn't
+        guaranteed to include every field (hospital, fee, reporting time) or
+        to stay in the patient's language."""
+        if result.get("action") in ("BOOK", "CANCEL"):
+            session.memory_loaded = False
+
+        labels  = translate_labels(self.llm, session.language_code)
+        booking = result.get("result", {})
+        if result.get("action") == "BOOK" and booking.get("status") == "CONFIRMED":
+            # Card labels are translated above; the values underneath them
+            # (patient/doctor/hospital names, address, department) still
+            # need it too — display-only, the data stored in `booking`
+            # stays in English (see normalize_to_english) so records and
+            # family lookups stay consistent regardless of what language a
+            # booking was made in.
+            display_fields = ["patient_name", "doctor_name", "hospital_name", "hospital_address", "department"]
+            values = {f: booking[f] for f in display_fields if booking.get(f)}
+            localized = translate_booking_values(self.llm, values, session.language_code)
+            result = {**result, "result": {**booking, **localized}}
+
+        formatted = format_booking_result(result, tool_args, labels)
+        if formatted:
+            return formatted
+
+        booking = result.get("result", {})
+        if result.get("action") == "CANCEL" and booking.get("status") == "CANCELLED":
+            return translate_text(self.llm, booking["message"], session.language_code)
+
+        return None
+
+    @traced("orchestrator._gate", run_type="chain", tags=["gate"])
     def _gate(self, tool_call, context: OrchestratorContext) -> GateResult:
         allowed = ROLE_PERMISSIONS.get(tool_call.tool_name, {Role.PATIENT, Role.DOCTOR})
         if context.session.role not in allowed:
@@ -308,6 +481,7 @@ class WhatsAppOrchestrator:
             return GateResult(GateStatus.CONFIRM_REQUIRED)
         return GateResult(GateStatus.OK)
 
+    @traced("orchestrator._execute_tool", run_type="tool", tags=["tool"])
     def _execute_tool(self, tool_call, context: OrchestratorContext) -> dict:
         name = tool_call.tool_name
         if name == "appointment":
@@ -360,22 +534,38 @@ class WhatsAppOrchestrator:
             return execute_delay_report(tool_call.args["preview"], self.notifier)
         return {"error": "unknown tool"}
 
+    # Genuinely transient — a rate limit, a server-side hiccup, a timeout,
+    # or a connection drop. Worth retrying. Checked by exception TYPE (the
+    # openai client raises a distinct class per real HTTP status/failure
+    # mode), not by pattern-matching the message text — a text search for
+    # "rate" was matching the word "GenerateContentRequest" inside an
+    # unrelated 400 error, wasting two retries on a request that could
+    # never succeed no matter how many times it was resent.
+    _TRANSIENT_LLM_ERRORS = (
+        openai.RateLimitError, openai.InternalServerError,
+        openai.APITimeoutError, openai.APIConnectionError,
+    )
+
     def _llm_call_with_retry(self, history, tool_schemas, system_prompt, max_retries: int = 3):
         delay = 2
         for attempt in range(1, max_retries + 1):
             try:
                 return self.llm.run_agent(history, tool_schemas, system_prompt)
-            except Exception as exc:
-                msg = str(exc)
-                is_transient = "503" in msg or "429" in msg or "UNAVAILABLE" in msg or "rate" in msg.lower()
-                if is_transient and attempt < max_retries:
+            except self._TRANSIENT_LLM_ERRORS as exc:
+                if attempt < max_retries:
                     print(f"  [LLM transient error, retrying in {delay}s... ({attempt}/{max_retries})]", flush=True)
                     time.sleep(delay)
                     delay *= 2
                 else:
                     logger.error("LLM error: %s", exc)
                     return None
+            except Exception as exc:
+                # Not transient (e.g. a malformed request) — retrying
+                # won't help, fail immediately instead of wasting time.
+                logger.error("LLM error: %s", exc)
+                return None
 
+    @traced("orchestrator._responder", run_type="chain", tags=["responder"])
     def _responder(self, text: str, context: OrchestratorContext):
         for chunk in chunk_text(text, max_chars=1000):
             try:
@@ -383,7 +573,7 @@ class WhatsAppOrchestrator:
             except Exception:
                 pass
         context.session.history.append(ChatTurn(role=ChatRole.ASSISTANT, content=text))
-        context.session.history = context.session.history[-self.max_history_turns:]
+        context.session.history = _trim_history(context.session.history, self.max_history_turns)
         self.repository.save_session(context.session)
 
     def _log_tool(self, tool_call):

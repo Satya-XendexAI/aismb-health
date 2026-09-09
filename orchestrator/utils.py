@@ -1,6 +1,4 @@
 _BOOKING_KEYWORDS = {"book", "appointment", "cancel", "token", "schedule", "register", "slot"}
-_AFFIRMATIVE      = {"yes", "y", "ok", "okay", "sure", "book", "confirm", "go ahead", "proceed", "yeah", "yep", "do it"}
-_NEGATIVE         = {"no", "n", "cancel", "stop", "nope", "never mind", "nevermind", "nah", "don't"}
 
 
 def detect_booking_intent(text: str) -> bool:
@@ -8,12 +6,13 @@ def detect_booking_intent(text: str) -> bool:
     return any(kw in lowered for kw in _BOOKING_KEYWORDS)
 
 
-def is_affirmative(text: str) -> bool:
-    """Exact match only — a longer reply that merely contains a word like
-    'book' or 'confirm' (e.g. 'book it for tomorrow instead') is NOT a plain
-    yes, it's new input that should go back through the LLM to be understood."""
-    return text.strip().lower() in _AFFIRMATIVE
+def looks_like_english(text: str) -> bool:
+    """Heuristic: true if text has no non-ASCII characters, i.e. it's plain
+    Latin-script English rather than one of the supported Indian-language
+    scripts (Telugu/Hindi/Tamil/Kannada all use non-ASCII code points).
 
-
-def is_negative(text: str) -> bool:
-    return text.strip().lower() in _NEGATIVE
+    Used to catch an LLM reply that slipped into English despite the
+    session being in another language — the system prompt asks the model to
+    always match the patient's language, but that's a soft instruction, not
+    a guarantee."""
+    return text.isascii()

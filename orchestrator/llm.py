@@ -1,5 +1,7 @@
 import json
+import logging
 import os
+import re
 from typing import List
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -7,9 +9,328 @@ from dotenv import load_dotenv
 from models.session import (
     ChatTurn, ChatRole, AgentResponse, AgentResponseType, ToolCall,
 )
-from prompts.system import PATIENT_SYSTEM_PROMPT
+from prompts.system import (
+    PATIENT_SYSTEM_PROMPT, TRANSLATE_MESSAGE_PROMPT, TRANSLATE_LABELS_PROMPT,
+    TRANSLATE_BOOKING_VALUES_PROMPT, NORMALIZE_TO_ENGLISH_PROMPT, RESOLVE_CONFIRMATION_PROMPT,
+)
+from orchestrator.schemas import CONFIRM_REPLY_TOOLS
+from orchestrator.tracing import traced, add_metadata, record_usage
 
 load_dotenv()
+logger = logging.getLogger(__name__)
+
+# Occasionally the model returns its raw reasoning instead of a real reply
+# (e.g. a response that literally starts with the word "Thought" on its own
+# line). Never forward that to a patient — fall back to a safe message instead.
+_LEAKED_REASONING_RE = re.compile(r"^\s*thought\s*\n", re.IGNORECASE)
+
+
+def _looks_like_leaked_reasoning(text: str) -> bool:
+    return bool(_LEAKED_REASONING_RE.match(text))
+
+
+# Fixed WhatsApp templates (booking confirm / confirmation card) are plain
+# English by default. LANGUAGE_NAMES maps the language codes Sarvam's
+# transcription returns (e.g. "te-IN" -> "te") to a human language name for
+# the translation prompt below.
+LANGUAGE_NAMES = {
+    "te": "Telugu",
+    "hi": "Hindi",
+    "ta": "Tamil",
+    "kn": "Kannada",
+    "en": "English",
+}
+
+
+# Numbers/tokens/amounts/dates that must survive a real translation untouched.
+# If the model produced a diff, an explanation, or leaked its own reasoning
+# instead of a clean translation, these almost never all show up verbatim —
+# far more robust than trying to blacklist every broken-output shape.
+_INVARIANT_RE = re.compile(r"#\d+|₹\d+|\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}")
+
+
+def _looks_like_broken_translation(original: str, translated: str) -> bool:
+    if not translated or "`" in translated or "->" in translated:
+        return True
+    if translated.count("(") != translated.count(")"):
+        return True  # e.g. the model stopped generating mid-parenthetical
+    if "**" in translated and "**" not in original:
+        return True  # the model invented an extra instruction the source never asked for
+    return any(literal not in translated for literal in _INVARIANT_RE.findall(original))
+
+
+def _request_translation(llm: "GeminiLLMAdapter", text: str, language_name: str) -> str:
+    completion = llm.client.chat.completions.create(
+        model=llm.model,
+        messages=[
+            {
+                "role": "system",
+                "content": TRANSLATE_MESSAGE_PROMPT.format(language_name=language_name),
+            },
+            {"role": "user", "content": text},
+        ],
+        temperature=0.1,
+        # Generous headroom: this model spends some of its token budget on
+        # internal "thinking" even for short prompts, and a tight max_tokens
+        # was observed truncating the visible reply mid-sentence.
+        max_tokens=4096,
+    )
+    return (completion.choices[0].message.content or "").strip()
+
+
+def translate_text(llm: "GeminiLLMAdapter", text: str, language_code: str | None) -> str:
+    """Translate a fixed template's labels into language_code, leaving numbers/emoji/dates as-is.
+
+    Falls back to the original English text if the language is English/unknown,
+    the translation call fails, or the model's output looks malformed (tried
+    twice before giving up, since this is somewhat stochastic).
+    """
+    lang_prefix = (language_code or "en").split("-")[0].lower()
+    language_name = LANGUAGE_NAMES.get(lang_prefix)
+    if not language_name or language_name == "English":
+        return text
+
+    for attempt in (1, 2):
+        try:
+            translated = _request_translation(llm, text, language_name)
+        except Exception as exc:
+            logger.warning("Template translation to %s failed, using English: %s", language_name, exc)
+            return text
+
+        if not _looks_like_broken_translation(text, translated):
+            return translated
+        logger.warning(
+            "Translation to %s looked malformed (attempt %d), %r",
+            language_name, attempt, translated[:200],
+        )
+
+    return text
+
+
+def resolve_confirmation(
+    llm: "GeminiLLMAdapter", reply_text: str, recent_context: str = "", pending_action: str | None = None,
+) -> str:
+    """Decide whether `reply_text` confirms or declines a pending action,
+    using recent conversation context (not just the bare reply) so an
+    imperfectly transcribed or unusually phrased reply is understood the
+    same way the rest of the conversation already is — instead of judging
+    a short, isolated string with no context at all.
+
+    Returns 'yes', 'no', or 'unclear' (new information, a correction, or
+    anything that isn't a plain confirmation). Falls back to 'unclear' on
+    any failure or unexpected output, so a pending action is never
+    silently treated as confirmed."""
+    system_prompt = RESOLVE_CONFIRMATION_PROMPT.format(
+        pending_action=pending_action or "the pending action",
+        recent_context=recent_context or "(no earlier context)",
+    )
+    try:
+        completion = llm.client.chat.completions.create(
+            model=llm.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": reply_text},
+            ],
+            tools=CONFIRM_REPLY_TOOLS,
+            tool_choice={"type": "function", "function": {"name": "resolve_confirmation"}},
+            temperature=0.0,
+            # Generous headroom, same reasoning as _request_translation above:
+            # this model spends part of its token budget on internal
+            # "thinking" before producing visible output (a tool call, here) —
+            # a tight budget was observed truncating generation (finish_reason
+            # "length") before the tool call ever appeared, silently falling
+            # back to "unclear" for a perfectly clear reply.
+            max_tokens=1024,
+        )
+        message = completion.choices[0].message
+        if not message.tool_calls:
+            return "unclear"
+        call = message.tool_calls[0]
+        if call.function.name != "resolve_confirmation":
+            # tool_choice forces this specific tool, but don't trust that
+            # blindly — never parse a differently-named call as our own.
+            return "unclear"
+        args = json.loads(call.function.arguments)
+        decision = (args.get("decision") or "").lower()
+    except Exception as exc:
+        logger.warning("Confirmation resolution failed, treating as unclear: %s", exc)
+        return "unclear"
+
+    return decision if decision in ("yes", "no", "unclear") else "unclear"
+
+
+# Fixed, unchanging messages (no dynamic content) only ever need translating
+# ONCE per language, then reused forever — turns an occasional flake into a
+# one-time cost instead of a per-message gamble.
+_STATIC_TRANSLATION_CACHE: dict[tuple[str, str], str] = {}
+
+
+def translate_static(llm: "GeminiLLMAdapter", text: str, language_code: str | None) -> str:
+    """Like translate_text, but caches successful results for exact, static strings."""
+    lang_prefix = (language_code or "en").split("-")[0].lower()
+    cache_key = (lang_prefix, text)
+    if cache_key in _STATIC_TRANSLATION_CACHE:
+        return _STATIC_TRANSLATION_CACHE[cache_key]
+
+    translated = translate_text(llm, text, language_code)
+    if translated != text:
+        _STATIC_TRANSLATION_CACHE[cache_key] = translated
+    return translated
+
+
+# The booking-confirmation card's field labels — translated as a small batch
+# (much easier for the model to get right than a whole rendered card) and
+# cached per language, so every booking after the first reuses known-good
+# labels instead of re-rolling the dice each time.
+CARD_LABELS = {
+    "appointment_confirmed":   "Appointment Confirmed",
+    "appointment_rescheduled": "Appointment Rescheduled",   # SLOT-mode reschedule card only
+    "token":                   "Token",
+    "time":                    "Time",                       # SLOT-mode card only, in place of "token"
+    "patient":                 "Patient Name",
+    "doctor":                  "Doctor",
+    "department":              "Department",
+    "hospital":                "Hospital",
+    "address":                 "Address",
+    "date":                    "Date",
+    "reporting_time":          "Reporting Time",
+    "fee":                     "Fee",
+}
+
+_LABEL_CACHE: dict[str, dict[str, str]] = {}
+_NUMBERED_LINE_RE = re.compile(r"^\s*\d+[.):]\s*(.+)$")
+
+
+def _translate_numbered_list(llm: "GeminiLLMAdapter", items: list[str], system_prompt: str) -> list[str] | None:
+    """Translate a short numbered list of strings in one batched call —
+    shared by translate_labels() and translate_booking_values(), since
+    both need the same "numbered in, numbered out" round trip and the
+    same malformed-output check. Returns None (never a partial or
+    wrong-length list) if the call fails or the output doesn't parse
+    cleanly, so callers can retry or fall back safely."""
+    numbered_prompt = "\n".join(f"{i+1}. {item}" for i, item in enumerate(items))
+    try:
+        completion = llm.client.chat.completions.create(
+            model=llm.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": numbered_prompt},
+            ],
+            temperature=0.1,
+            # Generous headroom — a tight budget was observed truncating
+            # the list mid-way (same concern as _request_translation).
+            max_tokens=4096,
+        )
+        reply = (completion.choices[0].message.content or "").strip()
+    except Exception as exc:
+        logger.warning("Batch translation failed: %s", exc)
+        return None
+
+    translated_lines = {}
+    for line in reply.splitlines():
+        m = _NUMBERED_LINE_RE.match(line)
+        if m:
+            translated_lines[len(translated_lines) + 1] = m.group(1).strip()
+
+    if len(translated_lines) == len(items) and all(
+        v and "`" not in v and "->" not in v for v in translated_lines.values()
+    ):
+        return [translated_lines[i + 1] for i in range(len(items))]
+
+    logger.warning("Batch translation looked malformed: %r", reply[:300])
+    return None
+
+
+def translate_labels(llm: "GeminiLLMAdapter", language_code: str | None) -> dict[str, str]:
+    """Translate CARD_LABELS into language_code once, then return the cached result.
+
+    Falls back to the English labels for any language that hasn't (yet)
+    translated successfully — never raises, never blocks a booking.
+    """
+    lang_prefix = (language_code or "en").split("-")[0].lower()
+    language_name = LANGUAGE_NAMES.get(lang_prefix)
+    if not language_name or language_name == "English":
+        return CARD_LABELS
+    if lang_prefix in _LABEL_CACHE:
+        return _LABEL_CACHE[lang_prefix]
+
+    keys = list(CARD_LABELS.keys())
+    prompt = TRANSLATE_LABELS_PROMPT.format(language_name=language_name)
+
+    for _ in (1, 2):
+        translated = _translate_numbered_list(llm, [CARD_LABELS[k] for k in keys], prompt)
+        if translated:
+            labels = dict(zip(keys, translated))
+            _LABEL_CACHE[lang_prefix] = labels
+            return labels
+
+    return CARD_LABELS
+
+
+def translate_booking_values(llm: "GeminiLLMAdapter", values: dict[str, str], language_code: str | None) -> dict[str, str]:
+    """Translate booking-card display VALUES (patient name, doctor name,
+    hospital name, address, department) into language_code — purely a
+    display-time step. The underlying stored booking data stays in
+    English regardless (see normalize_to_english / _normalize_appointment_
+    args), so records and family-member lookups stay consistent across
+    languages; this only affects what the patient reads on the card.
+
+    Names and places are transliterated phonetically (never translated by
+    meaning); department names are translated by meaning. Falls back to
+    the original English values for English/unknown languages or if the
+    call fails or looks malformed — a booking confirmation must never be
+    blocked or garbled by a translation hiccup."""
+    lang_prefix = (language_code or "en").split("-")[0].lower()
+    language_name = LANGUAGE_NAMES.get(lang_prefix)
+    if not language_name or language_name == "English" or not values:
+        return values
+
+    keys = list(values.keys())
+    prompt = TRANSLATE_BOOKING_VALUES_PROMPT.format(language_name=language_name)
+
+    for _ in (1, 2):
+        translated = _translate_numbered_list(llm, [values[k] for k in keys], prompt)
+        if translated:
+            return dict(zip(keys, translated))
+
+    return values
+
+
+def normalize_to_english(llm: "GeminiLLMAdapter", text: str) -> str:
+    """Convert patient-provided data (name, place, symptoms) to English for
+    storage, regardless of what language it was spoken in.
+
+    Names/places are transliterated phonetically (never translated by
+    meaning — a name isn't a word to translate); phrases/sentences are
+    translated by meaning. Already-English text is returned untouched, and
+    the original text is kept if the call fails or looks malformed — a
+    patient's data is never dropped over a translation hiccup.
+    """
+    if not text or text.isascii():
+        return text
+
+    try:
+        completion = llm.client.chat.completions.create(
+            model=llm.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": NORMALIZE_TO_ENGLISH_PROMPT,
+                },
+                {"role": "user", "content": text},
+            ],
+            temperature=0.1,
+            max_tokens=256,
+        )
+        result = (completion.choices[0].message.content or "").strip()
+    except Exception as exc:
+        logger.warning("normalize_to_english failed, keeping original: %s", exc)
+        return text
+
+    if not result or "`" in result or "->" in result:
+        logger.warning("normalize_to_english looked malformed, keeping original: %r", result[:200])
+        return text
+    return result
 
 
 class GeminiLLMAdapter:
@@ -22,7 +343,9 @@ class GeminiLLMAdapter:
         self.model  = model
         self.client = OpenAI(base_url=base_url, api_key=api_key, timeout=120.0)
 
+    @traced("GeminiLLMAdapter.run_agent", run_type="llm")
     def run_agent(self, history: List[ChatTurn], tool_schemas: list, system_prompt: str = PATIENT_SYSTEM_PROMPT) -> AgentResponse:
+        add_metadata(model=self.model)
         messages = [{"role": "system", "content": system_prompt}] + self._build_messages(history)
 
         completion = self.client.chat.completions.create(
@@ -38,6 +361,7 @@ class GeminiLLMAdapter:
         choice        = completion.choices[0]
         finish_reason = choice.finish_reason
         message       = choice.message
+        self._record_usage(completion)
 
 
         if finish_reason == "tool_calls" and message.tool_calls:
@@ -53,10 +377,19 @@ class GeminiLLMAdapter:
                 ),
             )
 
-        return AgentResponse(
-            type=AgentResponseType.TEXT,
-            text=message.content or "",
-        )
+        text = message.content or ""
+        if _looks_like_leaked_reasoning(text):
+            logger.warning("Suppressed a leaked-reasoning LLM response: %r", text[:200])
+            text = "Sorry, I'm having trouble with that — could you rephrase or try again?"
+
+        return AgentResponse(type=AgentResponseType.TEXT, text=text)
+
+    def _record_usage(self, completion):
+        """Push token usage + cost onto the active LangSmith run.
+
+        Raw OpenAI clients don't populate usage automatically; record_usage
+        writes it to run.metadata["usage_metadata"] so LangSmith computes tokens and cost."""
+        record_usage(completion, model=self.model)
 
     def _build_messages(self, history: List[ChatTurn]) -> list:
         messages = []
@@ -68,6 +401,12 @@ class GeminiLLMAdapter:
                     messages.append({"role": "user", "content": turn.content})
 
             elif turn.role == ChatRole.ASSISTANT:
+                if turn.tool_call and not (turn.tool_call.tool_name and turn.tool_call.tool_use_id):
+                    # Same invalid-input risk as the TOOL_RESULT branch
+                    # below — a tool call with no name/id is something
+                    # Gemini rejects outright ("Name cannot be empty").
+                    # Skip it rather than send it.
+                    continue
                 if turn.tool_call:
                     tc_entry = {
                         "id":       turn.tool_call.tool_use_id,

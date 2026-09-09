@@ -3,17 +3,19 @@ import logging
 
 from models.session import SessionState, PlanAction, ToolCall
 from orchestrator.formatters import format_plan_summary, format_delay_preview, describe_tool
+from orchestrator.llm import translate_text
 
 logger = logging.getLogger(__name__)
 
 
-def interrupt_tool(tool_call, context, repository, notifier):
+def interrupt_tool(tool_call, context, repository, notifier, llm):
     """Enter AWAITING_CONFIRM for a single tool (e.g. appointment booking)."""
     context.session.pending_tool = tool_call
     context.session.state        = SessionState.AWAITING_CONFIRM
     repository.save_session(context.session)
+    text = translate_text(llm, f"Please confirm: {describe_tool(tool_call)}", context.session.language_code)
     try:
-        notifier.send(context.wa_message.from_number, f"Please confirm: {describe_tool(tool_call)}")
+        notifier.send(context.wa_message.from_number, text)
     except Exception:
         pass
 

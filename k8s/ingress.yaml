@@ -5,7 +5,7 @@ metadata:
   namespace: aismb-health
   annotations:
     nginx.ingress.kubernetes.io/ssl-redirect: "false"  # Front Door terminates TLS; forwards HTTP to this ingress
-    # The interface's /api/send is synchronous and can chain several LLM calls,
+    # The webhook endpoint is synchronous and can chain several LLM calls,
     # so raise the default 60s proxy timeout to avoid "Error contacting server".
     nginx.ingress.kubernetes.io/proxy-read-timeout: "300"
     nginx.ingress.kubernetes.io/proxy-send-timeout: "300"
@@ -33,10 +33,3 @@ spec:
                 name: aismb-whatsapp-service
                 port:
                   number: 8000
-          - path: /
-            pathType: Prefix
-            backend:
-              service:
-                name: aismb-interface-service
-                port:
-                  number: 8001

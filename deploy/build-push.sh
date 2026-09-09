@@ -24,5 +24,5 @@ docker build -t "$IMAGE:$TAG" "$ROOT"
 echo ">> Pushing $IMAGE:$TAG"
 docker push "$IMAGE:$TAG"
 
-echo ">> Done. Update image: in whatsapp-manifest.yaml and interface-manifest.yaml"
+echo ">> Done. Update image: in whatsapp-manifest.yaml"
 echo "   set image: $IMAGE:$TAG"

@@ -248,6 +248,39 @@ _report_delay_schema = {
     },
 }
 
+_resolve_confirmation_schema = {
+    "type": "function",
+    "function": {
+        "name": "resolve_confirmation",
+        "description": (
+            "Decide whether the patient's latest reply confirms or "
+            "declines the pending action, using the conversation context "
+            "provided."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "decision": {
+                    "type": "string",
+                    "enum": ["yes", "no", "unclear"],
+                    "description": (
+                        "'yes' if the reply clearly confirms the pending "
+                        "action, in any language, phrasing, or code-mixing "
+                        "— including naming the action back (e.g. 'cancel' "
+                        "confirming a cancellation). 'no' if it clearly "
+                        "declines. 'unclear' if it's new information, a "
+                        "correction, an unrelated question, or genuinely "
+                        "ambiguous."
+                    ),
+                },
+            },
+            "required": ["decision"],
+        },
+    },
+}
+
+CONFIRM_REPLY_TOOLS = [_resolve_confirmation_schema]
+
 PATIENT_TOOLS        = [_appointment_schema, _list_appointments_schema, _list_available_slots_schema, _kg_retriever_schema, _memory_tool_schema]
 PATIENT_TOOLS_WARMUP = [_list_appointments_schema, _list_available_slots_schema, _kg_retriever_schema, _memory_tool_schema]
 DOCTOR_TOOLS         = [_kg_retriever_schema, _query_data_schema, _report_delay_schema]
