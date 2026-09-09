@@ -64,8 +64,11 @@ def _numbered_translation(values):
 
 
 def test_translate_labels_returns_all_translated_keys():
+    # Order must match CARD_LABELS' key order exactly — translate_labels
+    # zips the translated batch positionally against list(CARD_LABELS).
     translated_values = [
-        "అపాయింట్‌మెంట్ నిర్ధారించబడింది", "టోకెన్", "రోగి పేరు", "డాక్టర్", "విభాగం",
+        "అపాయింట్‌మెంట్ నిర్ధారించబడింది", "అపాయింట్‌మెంట్ మార్చబడింది", "టోకెన్", "సమయం",
+        "రోగి పేరు", "డాక్టర్", "విభాగం",
         "ఆసుపత్రి", "చిరునామా", "తేదీ", "రిపోర్టింగ్ సమయం", "ఫీజు",
     ]
     adapter = _adapter_with_completion(_numbered_translation(translated_values))

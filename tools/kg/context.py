@@ -1,4 +1,4 @@
-from tools.kg.client import HOSPITAL_NAME, TENANT_ID
+from config.kg_tenants import kg_tenant_id
 from tools.kg.resolver import parse_query, resolve_specializations
 from tools.kg.queries import (
     find_doctors_by_specialization,
@@ -31,14 +31,14 @@ def _fuse_results(vector_results: list[dict], graph_results: list[dict], n: int 
     return [doc_data[did] for did in sorted_ids[:n] if did in doc_data]
 
 
-def _build_context(fused: list[dict]) -> str | dict:
+def _build_context(fused: list[dict], hospital_name: str) -> str | dict:
     if not fused:
         return {
-            "context_text": f"No matching doctors found in {HOSPITAL_NAME} for this specialty.",
+            "context_text": f"No matching doctors found in {hospital_name} for this specialty.",
             "doctors": [],
             "found": False,
         }
-    lines = [f"RELEVANT DOCTORS FROM {HOSPITAL_NAME.upper()}:\n"]
+    lines = [f"RELEVANT DOCTORS FROM {hospital_name.upper()}:\n"]
     for i, doc in enumerate(fused, 1):
         name  = doc.get("name", "Unknown")
         specs = doc.get("specializations", "")
@@ -94,24 +94,39 @@ def _no_language_for_specialty_response(language: str, specs: list[str], special
     return {"context_text": text, "doctors": [], "needs_language_broadening": True}
 
 
-def retrieve_context(query: str) -> dict:
-    """Public API: retrieve doctors for a free-text patient query."""
+def retrieve_context(query: str, hospital_id: str | None = None, hospital_name: str | None = None) -> dict:
+    """Public API: retrieve doctors for a free-text patient query, scoped to
+    one hospital's Neo4j tenant. hospital_id must come from the session
+    (injected by the orchestrator) — never from the LLM or patient text,
+    same rule as hospital_id everywhere else in this codebase."""
+    tenant_id = kg_tenant_id(hospital_id) if hospital_id else None
+    if tenant_id is None:
+        # Fail closed: no known tenant mapping for this hospital means "no
+        # doctors available," never an unscoped search across every
+        # hospital's doctors (queries.py treats a missing tenant_id as
+        # "no filter" — that's the exact bug this whole fix closes).
+        return {
+            "context_text": "Doctor search isn't set up for this hospital yet.",
+            "doctors": [], "found": False,
+        }
+    hospital_name = hospital_name or hospital_id
+
     parsed = parse_query(query)
     specs  = resolve_specializations(parsed.get("specializations", []))
 
     specialty_results: list[dict] = []
     for spec in specs:
-        specialty_results += find_doctors_by_specialization(spec, 8, TENANT_ID)
+        specialty_results += find_doctors_by_specialization(spec, 8, tenant_id)
 
     graph_results: list[dict] = list(specialty_results)
     if parsed.get("doctor_name"):
-        graph_results += find_by_fulltext(parsed["doctor_name"], 8, TENANT_ID)
+        graph_results += find_by_fulltext(parsed["doctor_name"], 8, tenant_id)
 
-    vector_results = semantic_search(query, 8, TENANT_ID)
+    vector_results = semantic_search(query, 8, tenant_id)
 
     language = parsed.get("language")
     if language:
-        lang_docs = find_doctors_by_language(language, 100, TENANT_ID)
+        lang_docs = find_doctors_by_language(language, 100, tenant_id)
         if not lang_docs:
             return _no_language_response(language, specs)
 
@@ -134,7 +149,7 @@ def retrieve_context(query: str) -> dict:
             graph_results = lang_docs
 
     if not graph_results and not vector_results:
-        graph_results += find_by_fulltext(query, 8, TENANT_ID)
+        graph_results += find_by_fulltext(query, 8, tenant_id)
 
     fused = _fuse_results(vector_results, graph_results)
 
@@ -144,7 +159,7 @@ def retrieve_context(query: str) -> dict:
         if key in slot_map:
             d["next_slot"] = slot_map[key]
 
-    context_text = _build_context(fused)
+    context_text = _build_context(fused, hospital_name)
     if isinstance(context_text, dict):
         return context_text
     return {"context_text": context_text, "doctors": fused}

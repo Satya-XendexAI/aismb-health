@@ -22,19 +22,22 @@ from pydantic import BaseModel
 
 from orchestrator import WhatsAppOrchestrator, InMemoryRepository, GeminiLLMAdapter, WAMessage
 from interface.notifier import CaptureNotifier
+from tools.appointment import database as appt_db
 from whatsapp import transcribe_audio
 from orchestrator.llm import translate_static
 
 logging.basicConfig(level=logging.ERROR, format="%(name)s %(levelname)s: %(message)s")
 logger = logging.getLogger(__name__)
 
-HOSPITAL_ID = "glngs-chn"
-STATIC_DIR  = Path(__file__).parent / "static"
+STATIC_DIR = Path(__file__).parent / "static"
 
 with open("config/doctors.json") as f:
     _cfg    = json.load(f)
     DOCTORS = _cfg["doctors"]
     ADMINS  = _cfg.get("admins", [])
+
+with appt_db.get_connection() as _conn:
+    HOSPITALS = appt_db.list_hospitals(_conn)   # [{hospital_id, name, booking_mode}, ...] — live from DB, not hardcoded
 
 # ── Orchestrator wiring ────────────────────────────────────────────────
 
@@ -65,6 +68,7 @@ async def no_cache_static(request, call_next):
 class ChatMessage(BaseModel):
     text:        str
     from_number: str
+    hospital_id: str
 
 
 @app.get("/")
@@ -81,34 +85,43 @@ def index():
 
 @app.get("/api/config")
 def get_config():
-    """Return known numbers and their roles for the login screen."""
+    """Return known numbers/roles and the live hospital list for the login screen."""
     users = []
     for a in ADMINS:
         users.append({"phone": a["phone"], "name": a["name"], "role": "admin"})
     for d in DOCTORS:
         users.append({"phone": d["phone"], "name": d["name"], "role": "doctor"})
-    return {"users": users, "hospital_id": HOSPITAL_ID}
+    return {"users": users, "hospitals": HOSPITALS}
 
 
 @app.post("/api/send")
 def send_message(message: ChatMessage):
     if not message.from_number.strip():
         raise HTTPException(status_code=400, detail="from_number is required")
+    if not message.hospital_id.strip():
+        raise HTTPException(status_code=400, detail="hospital_id is required")
     wa_message = WAMessage(
         from_number=message.from_number.strip(),
         message_id=str(uuid.uuid4()),
         text=message.text,
-        hospital_id=HOSPITAL_ID,
+        hospital_id=message.hospital_id.strip(),
     )
     orchestrator.handle_message(wa_message)
     return {"replies": notifier.drain()}
 
 
 @app.post("/api/send-audio")
-async def send_audio_message(from_number: str = Form(...), audio: UploadFile = File(...)):
+async def send_audio_message(
+    from_number: str = Form(...),
+    hospital_id: str = Form(...),
+    audio: UploadFile = File(...),
+):
     from_number = from_number.strip()
     if not from_number:
         raise HTTPException(status_code=400, detail="from_number is required")
+    hospital_id = hospital_id.strip()
+    if not hospital_id:
+        raise HTTPException(status_code=400, detail="hospital_id is required")
 
     audio_bytes = await audio.read()
     try:
@@ -129,7 +142,7 @@ async def send_audio_message(from_number: str = Form(...), audio: UploadFile = F
         from_number=from_number,
         message_id=str(uuid.uuid4()),
         text=transcript,
-        hospital_id=HOSPITAL_ID,
+        hospital_id=hospital_id,
         language_code=language_code,
     )
     orchestrator.handle_message(wa_message)

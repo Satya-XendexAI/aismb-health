@@ -1,10 +1,10 @@
 from datetime import datetime
-from typing import Literal, Optional, Union
+from typing import List, Literal, Optional, Union
 from pydantic import BaseModel
 
 
 class IncomingPayload(BaseModel):
-    action:               Literal["BOOK", "CANCEL"]
+    action:               Literal["BOOK", "CANCEL", "RESCHEDULE"]
     hospital_id:          str
     doctor_id:            str
     department:           str
@@ -14,6 +14,7 @@ class IncomingPayload(BaseModel):
     patient_location:     Optional[str] = None
     symptoms:             Optional[str] = None
     date:                 Optional[str] = None        # YYYY-MM-DD
+    slot_id:              Optional[str] = None        # SLOT-mode only: which slot to book/reschedule into
     requester_phone:      str                         # WhatsApp sender (set by core.py)
     relation_to_requester: str = "self"               # free text: "wife", "father", etc.
 
@@ -31,6 +32,22 @@ class BookingConfirmation(BaseModel):
     estimated_time:       datetime
 
 
+class SlotBookingConfirmation(BaseModel):
+    status:               Literal["CONFIRMED"]
+    appointment_id:       str
+    patient_name:         str
+    relation_to_requester: str
+    doctor_name:          str
+    department:           str
+    hospital_name:        str
+    hospital_address:     Optional[str]   = None
+    slot_date:            str
+    slot_time:            str
+    fee:                  Optional[float] = None
+    was_rescheduled:      bool = False   # book_slot() leaves default; reschedule_slot() sets True —
+                                          # so the LLM says "moved to" not "booked for"
+
+
 class CancellationResult(BaseModel):
     status:        Literal["CANCELLED", "PATIENT_NOT_FOUND", "NO_ACTIVE_BOOKING"]
     message:       str
@@ -41,8 +58,9 @@ class ErrorResult(BaseModel):
     status:     Literal["ERROR"]
     error_code: str
     message:    str
+    candidates: Optional[List[dict]] = None            # AMBIGUOUS_APPOINTMENT: candidates to pick from
 
 
 class BookingResponse(BaseModel):
-    action: Literal["BOOK", "CANCEL"]
-    result: Union[BookingConfirmation, CancellationResult, ErrorResult]
+    action: Literal["BOOK", "CANCEL", "RESCHEDULE"]
+    result: Union[BookingConfirmation, SlotBookingConfirmation, CancellationResult, ErrorResult]

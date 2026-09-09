@@ -15,9 +15,6 @@ _PASSWORD = os.getenv("NEO4J_PASSWORD", "")
 _DB       = os.getenv("NEO4J_DATABASE", "neo4j")
 _INSECURE = os.getenv("NEO4J_INSECURE", "false").lower() in ("1", "true", "yes", "on")
 
-TENANT_ID     = os.getenv("TENANT_ID",     "glh-chn")
-HOSPITAL_NAME = os.getenv("HOSPITAL_NAME", "Hospital")
-
 
 def _make_driver():
     uri = _URI
@@ -36,7 +33,12 @@ driver = _make_driver()
 database = _DB
 
 # ── Gemini clients (OpenAI-compatible) ────────────────────────────────────────
- 
+# NOTE: no module-level TENANT_ID/HOSPITAL_NAME here anymore — the Neo4j
+# tenant to search is resolved per-request from the session's hospital_id
+# (see config/kg_tenants.py + tools/kg/context.py), not fixed at process
+# startup. A global constant meant every search always hit the same tenant
+# regardless of which hospital the patient was actually messaging.
+
 gemini_client = OpenAI(
     api_key=os.getenv("GEMINI_API_KEY", ""),
     base_url="https://generativelanguage.googleapis.com/v1beta/openai/",

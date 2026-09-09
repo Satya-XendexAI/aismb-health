@@ -27,6 +27,11 @@ INCOMING_AUDIO = {
     "mime_type":   "audio/ogg; codecs=opus",
 }
 
+# handle_audio_message() requires hospital_id — receive_webhook() adds it
+# (resolved via get_live_hospital()) before handing off to the background
+# task, so the raw extract_audio_message() output above never has it.
+INCOMING_AUDIO_WITH_HOSPITAL = {**INCOMING_AUDIO, "hospital_id": "mit-lbn"}
+
 
 # ── extract_audio_message ──────────────────────────────────────────────────
 
@@ -93,7 +98,7 @@ def test_handle_audio_message_happy_path_calls_orchestrator():
          patch("whatsapp.transcribe_audio", return_value=("book me an appointment", "te-IN")) as mock_tx, \
          patch.object(whatsapp.orchestrator, "handle_message") as mock_handle:
 
-        whatsapp.handle_audio_message(INCOMING_AUDIO)
+        whatsapp.handle_audio_message(INCOMING_AUDIO_WITH_HOSPITAL)
 
     mock_dl.assert_called_once_with("1234567890123456")
     mock_tx.assert_called_once_with(b"BYTES", "audio/ogg; codecs=opus")
@@ -101,7 +106,7 @@ def test_handle_audio_message_happy_path_calls_orchestrator():
     assert isinstance(sent, WAMessage)
     assert sent.text == "book me an appointment"
     assert sent.from_number == "919876543210"
-    assert sent.hospital_id == whatsapp.HOSPITAL_ID
+    assert sent.hospital_id == "mit-lbn"
     assert sent.language_code == "te-IN"
 
 
@@ -132,17 +137,30 @@ def test_handle_audio_message_download_failure_sends_error_text():
 
 def test_webhook_routes_audio_message_to_background_task():
     with patch("whatsapp.WEBHOOK_SECRET", ""), \
+         patch("whatsapp.appt_db.get_live_hospital", return_value={"hospital_id": "mit-lbn"}), \
          patch("whatsapp.handle_audio_message") as mock_handler:
         response = client.post("/webhook", json=AUDIO_PAYLOAD)
 
     assert response.status_code == 200
-    mock_handler.assert_called_once_with(INCOMING_AUDIO)
+    mock_handler.assert_called_once_with(INCOMING_AUDIO_WITH_HOSPITAL)
 
 
 def test_webhook_still_routes_text_message_to_orchestrator():
     with patch("whatsapp.WEBHOOK_SECRET", ""), \
+         patch("whatsapp.appt_db.get_live_hospital", return_value={"hospital_id": "mit-lbn"}), \
          patch.object(whatsapp.orchestrator, "handle_message") as mock_handle:
         response = client.post("/webhook", json=TEXT_PAYLOAD)
 
     assert response.status_code == 200
     assert mock_handle.call_args[0][0].text == "hi"
+    assert mock_handle.call_args[0][0].hospital_id == "mit-lbn"
+
+
+def test_webhook_drops_message_when_no_hospital_is_live():
+    with patch("whatsapp.WEBHOOK_SECRET", ""), \
+         patch("whatsapp.appt_db.get_live_hospital", return_value=None), \
+         patch.object(whatsapp.orchestrator, "handle_message") as mock_handle:
+        response = client.post("/webhook", json=TEXT_PAYLOAD)
+
+    assert response.status_code == 200
+    mock_handle.assert_not_called()

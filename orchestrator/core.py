@@ -200,6 +200,11 @@ class WhatsAppOrchestrator:
         else:
             use_full_tools = session.booking_intent or session.turn_count >= 3
             tool_schemas   = PATIENT_TOOLS if use_full_tools else PATIENT_TOOLS_WARMUP
+            if session.booking_mode != "SLOT":
+                # list_available_slots only makes sense for SLOT-mode hospitals —
+                # dropped here so a TOKEN-mode patient's LLM can never call it
+                # and get a confusing empty-list result.
+                tool_schemas = [t for t in tool_schemas if t["function"]["name"] != "list_available_slots"]
             if not session.memory_loaded:
                 self._preload_memory(session, wa_message)
             system_prompt = PATIENT_SYSTEM_PROMPT + f"\n\nToday's date is {date.today().isoformat()}."
@@ -210,6 +215,8 @@ class WhatsAppOrchestrator:
         session_info = f"\n\nSESSION INFO:\n- Turn: {session.turn_count}"
         if known_name:
             session_info += f"\n- Name: {known_name}"
+        if session.role == Role.PATIENT:
+            session_info += f"\n- Booking mode: {session.booking_mode}"
         return system_prompt + session_info, tool_schemas
 
     def _react_loop(self, context, system_prompt, tool_schemas):
@@ -319,6 +326,7 @@ class WhatsAppOrchestrator:
                 pending_tool = None,
                 role         = self.repository.get_role(wa_message.from_number),
             )
+            session.booking_mode, session.hospital_name = self._lookup_hospital_meta(wa_message.hospital_id)
         elif now - session.last_active_at > self.session_idle_reset:
             # The session store has no concept of "today" vs. "last week" —
             # a phone number that messaged once, ever, stays "mid-conversation"
@@ -360,6 +368,22 @@ class WhatsAppOrchestrator:
             if len(lines) == max_turns:
                 break
         return "\n".join(reversed(lines))
+
+    def _lookup_hospital_meta(self, hospital_id: str) -> tuple[str, str]:
+        """(booking_mode, name) looked up once per new session (same
+        lifetime as role, above) — one DB round trip feeds both the
+        SLOT-aware prompt/tool-list and the per-hospital label kg_retriever
+        needs, without hardcoding either anywhere in application code."""
+        try:
+            from tools.appointment import database as appt_db
+            with appt_db.get_connection() as conn:
+                hospital = appt_db.get_hospital(conn, hospital_id)
+            if not hospital:
+                return "TOKEN", ""
+            return hospital["booking_mode"], hospital["name"]
+        except Exception as exc:
+            logger.warning("hospital lookup failed for %s: %s", hospital_id, exc)
+            return "TOKEN", ""
 
     def _preload_memory(self, session, wa_message: WAMessage):
         try:
@@ -475,9 +499,21 @@ class WhatsAppOrchestrator:
                 requester_phone=context.wa_message.from_number,
                 patient_name=tool_call.args.get("patient_name"),
             )
+        if name == "list_available_slots":
+            from tools.appointment import list_available_slots
+            return list_available_slots(
+                hospital_id=context.wa_message.hospital_id,
+                doctor_id=tool_call.args["doctor_id"],
+                date=tool_call.args["date"],
+                offset=tool_call.args.get("offset", 0),
+            )
         if name == "kg_retriever":
             from tools.kg_retriever import retrieve_context
-            return retrieve_context(**tool_call.args)
+            return retrieve_context(
+                query=tool_call.args["query"],
+                hospital_id=context.wa_message.hospital_id,
+                hospital_name=context.session.hospital_name,
+            )
         if name == "memory_tool":
             from tools.memory_tool import run as memory_run
             return memory_run(phone=context.wa_message.from_number, hospital_id=context.wa_message.hospital_id)

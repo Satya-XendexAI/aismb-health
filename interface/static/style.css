@@ -246,6 +246,30 @@ body {
   margin-bottom: 4px;
 }
 
+.login-hospital {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  text-align: left;
+}
+
+.login-hospital label {
+  color: #8696a0;
+  font-size: 12px;
+}
+
+.login-hospital select {
+  width: 100%;
+  padding: 10px 12px;
+  background: #2a3942;
+  border: 1px solid #3b4a54;
+  border-radius: 8px;
+  color: #e9edef;
+  font-size: 13px;
+  outline: none;
+}
+
 .login-options {
   width: 100%;
   display: flex;

@@ -1,13 +1,18 @@
-let currentUser = null;   // { phone, name, role }
+let currentUser     = null;   // { phone, name, role }
+let currentHospital = null;   // { hospital_id, name, booking_mode }
+let hospitals       = [];
 
-const loginOverlay = document.getElementById("loginOverlay");
-const phoneUI      = document.getElementById("phoneUI");
-const loginOptions = document.getElementById("loginOptions");
-const roleBadge    = document.getElementById("roleBadge");
-const chatBody     = document.getElementById("chatBody");
-const textInput    = document.getElementById("textInput");
-const sendBtn      = document.getElementById("sendBtn");
-const micBtn       = document.getElementById("micBtn");
+const loginOverlay   = document.getElementById("loginOverlay");
+const phoneUI        = document.getElementById("phoneUI");
+const loginOptions   = document.getElementById("loginOptions");
+const hospitalSelect = document.getElementById("hospitalSelect");
+const roleBadge      = document.getElementById("roleBadge");
+const contactName    = document.getElementById("contactName");
+const contactStatus  = document.getElementById("contactStatus");
+const chatBody       = document.getElementById("chatBody");
+const textInput      = document.getElementById("textInput");
+const sendBtn        = document.getElementById("sendBtn");
+const micBtn         = document.getElementById("micBtn");
 
 // ── Login ──────────────────────────────────────────────────────────────
 
@@ -19,6 +24,19 @@ async function loadLoginOptions() {
   try {
     const res  = await fetch("/api/config");
     const data = await res.json();
+
+    hospitals = data.hospitals || [];
+    hospitals.forEach(h => {
+      const opt = document.createElement("option");
+      opt.value = h.hospital_id;
+      opt.textContent = `${h.name} (${h.booking_mode})`;
+      hospitalSelect.appendChild(opt);
+    });
+    if (hospitals.length) currentHospital = hospitals[0];
+    hospitalSelect.addEventListener("change", () => {
+      currentHospital = hospitals.find(h => h.hospital_id === hospitalSelect.value) || null;
+    });
+
     data.users.forEach(user => {
       const btn = document.createElement("button");
       btn.className = "login-option-btn";
@@ -44,11 +62,17 @@ document.getElementById("customBtn").addEventListener("click", () => {
 });
 
 function startSession(user) {
+  if (!currentHospital) {
+    alert("No hospital available — check /api/config.");
+    return;
+  }
   currentUser = user;
   loginOverlay.style.display = "none";
   phoneUI.style.display      = "flex";
   roleBadge.textContent      = `${ROLE_ICON[user.role]} ${ROLE_LABEL[user.role]}`;
   roleBadge.style.background = ROLE_COLOR[user.role];
+  contactName.textContent    = currentHospital.name;
+  contactStatus.textContent  = `${currentHospital.booking_mode} mode · online`;
   textInput.focus();
 }
 
@@ -107,7 +131,7 @@ async function sendMessage() {
     const res  = await fetch("/api/send", {
       method:  "POST",
       headers: { "Content-Type": "application/json" },
-      body:    JSON.stringify({ text, from_number: currentUser.phone }),
+      body:    JSON.stringify({ text, from_number: currentUser.phone, hospital_id: currentHospital.hospital_id }),
     });
     const data = await res.json();
     hideTyping();
@@ -160,6 +184,7 @@ async function sendRecordedAudio() {
 
   const form = new FormData();
   form.append("from_number", currentUser.phone);
+  form.append("hospital_id", currentHospital.hospital_id);
   form.append("audio", blob, "voice.webm");
 
   try {

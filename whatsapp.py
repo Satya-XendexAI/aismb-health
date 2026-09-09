@@ -22,6 +22,7 @@ from fastapi import FastAPI, Request, BackgroundTasks, Query
 from fastapi.responses import PlainTextResponse, JSONResponse
 
 from orchestrator import WhatsAppOrchestrator, InMemoryRepository, GeminiLLMAdapter, WAMessage
+from tools.appointment import database as appt_db
 from orchestrator.llm import translate_static
 
 load_dotenv()
@@ -30,7 +31,6 @@ logger = logging.getLogger(__name__)
 
 # ── Config ──────────────────────────────────────────────────────────────
 
-HOSPITAL_ID     = "glngs-chn"
 PHONE_NUMBER_ID = os.getenv("PHONE_NUMBER_ID", "")
 ACCESS_TOKEN    = os.getenv("ACCESS_TOKEN", "")
 VERIFY_TOKEN    = os.getenv("VERIFY_TOKEN", "")
@@ -162,7 +162,7 @@ def handle_audio_message(incoming: dict):
             from_number=incoming["from_number"],
             message_id=incoming["message_id"],
             text=transcript,
-            hospital_id=HOSPITAL_ID,
+            hospital_id=incoming["hospital_id"],
             language_code=language_code,
         )
         orchestrator.handle_message(wa_message)
@@ -217,20 +217,34 @@ async def receive_webhook(request: Request, background_tasks: BackgroundTasks):
 
     payload = json.loads(body)
 
-    incoming_text = extract_text_message(payload)
+    incoming_text  = extract_text_message(payload)
+    incoming_audio = extract_audio_message(payload) if not incoming_text else None
+
+    if not incoming_text and not incoming_audio:
+        return JSONResponse({"status": "ok"})
+
+    # Resolved once per webhook call, used by both the text and audio paths —
+    # see migrations/0007: routes to whichever hospital is currently flagged
+    # is_live_number=true, instead of a hardcoded hospital.
+    with appt_db.get_connection() as conn:
+        hospital = appt_db.get_live_hospital(conn)
+    if not hospital:
+        logger.error("No hospital is currently flagged is_live_number=true — dropping message.")
+        return JSONResponse({"status": "ok"})
+    hospital_id = hospital["hospital_id"]
+
     if incoming_text:
         wa_message = WAMessage(
             from_number=incoming_text["from_number"],
             message_id=incoming_text["message_id"],
             text=incoming_text["text"],
-            hospital_id=HOSPITAL_ID,
+            hospital_id=hospital_id,
         )
         background_tasks.add_task(orchestrator.handle_message, wa_message)
         return JSONResponse({"status": "ok"})
 
-    incoming_audio = extract_audio_message(payload)
-    if incoming_audio:
-        background_tasks.add_task(handle_audio_message, incoming_audio)
+    incoming_audio["hospital_id"] = hospital_id
+    background_tasks.add_task(handle_audio_message, incoming_audio)
 
     return JSONResponse({"status": "ok"})
 

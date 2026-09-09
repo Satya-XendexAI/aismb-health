@@ -183,16 +183,18 @@ def translate_static(llm: "GeminiLLMAdapter", text: str, language_code: str | No
 # cached per language, so every booking after the first reuses known-good
 # labels instead of re-rolling the dice each time.
 CARD_LABELS = {
-    "appointment_confirmed": "Appointment Confirmed",
-    "token":                 "Token",
-    "patient":               "Patient Name",
-    "doctor":                "Doctor",
-    "department":            "Department",
-    "hospital":               "Hospital",
-    "address":                "Address",
-    "date":                   "Date",
-    "reporting_time":         "Reporting Time",
-    "fee":                    "Fee",
+    "appointment_confirmed":   "Appointment Confirmed",
+    "appointment_rescheduled": "Appointment Rescheduled",   # SLOT-mode reschedule card only
+    "token":                   "Token",
+    "time":                    "Time",                       # SLOT-mode card only, in place of "token"
+    "patient":                 "Patient Name",
+    "doctor":                  "Doctor",
+    "department":              "Department",
+    "hospital":                "Hospital",
+    "address":                 "Address",
+    "date":                    "Date",
+    "reporting_time":          "Reporting Time",
+    "fee":                     "Fee",
 }
 
 _LABEL_CACHE: dict[str, dict[str, str]] = {}
